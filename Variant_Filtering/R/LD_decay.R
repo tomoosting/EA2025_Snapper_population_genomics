@@ -2,6 +2,9 @@
 # Tom Oosting
 # 2025-05-10
 
+# Inspiration taken from:
+# https://speciationgenomics.github.io/ld_decay/
+
 #load packages
 library(optparse)
 library(glue)
