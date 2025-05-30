@@ -1,0 +1,485 @@
+---
+title: "Untitled"
+author: "Tom Oosting"
+date: "2023-09-08"
+output: html_document
+---
+
+```{r}
+###general 
+library(tidyverse)
+library(data.table)
+library(stringr)
+library(glue)
+library(runner)
+library(rlist)
+library(PopGenome)
+library(ggplot2)
+library(ggsignif)
+library(ggrepel)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(svglite)
+library(gdsfmt)
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+
+library(vcfR)
+
+
+```
+
+```{r}
+#input
+data_set          <- "snapper_norm"
+filter            <- "qc"
+SNP_ext           <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+sample_file       <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+ref_genome        <- "D:/Research/Projects/snapper/02_reference_genome/Nuclear/Chrysophrys_auratus.v.1.0.all.assembly.units.fasta"
+annot_female_path <- "D:/Research/Projects/snapper/02_reference_genome/Nuclear/annotation/Chrysophrys_auratus.v.1.0.all.female.map.fsa_annotation_table.tsv"
+annot_male_path   <- "D:/Research/Projects/snapper/02_reference_genome/Nuclear/annotation/Chrysophrys_auratus.v.1.0.all.male.map.fsa_annotation_table.tsv"
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}/genome_scan")
+dir.create(output_dir)
+```
+
+
+
+```{r}
+#read gds snprelate
+gds <- snpgdsReadGDS(gds_file = paste0(SNP_ext,".gds")) #gdsfmt::closefn.gds(gds) if you need to close the gds file
+#extract locus information
+bim <- snpgdsSNPsum(gds = gds, extended = FALSE)
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+samples <- read.gdsn(index.gdsn(gds, "sample.id"))
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND)
+sample_info <- sample_info[match(samples, sample_info$IND),]
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+#strata(genlight) <- sample_info # needs adegenet
+
+#get population metrics
+pops <- unique(sample_info$GENETIC_CLUSTER)
+Npops <- length(pops)
+pop_combs <- as.data.frame(t(utils::combn(pops,2)))
+pop_combs <- pop_combs %>% mutate(merge = paste(V1,V2,sep = "."))
+colnames(pop_combs) <- c("pop1","pop2","combID")
+combs <- pop_combs$combID
+N_comb <- nrow(pop_combs)
+
+#information reference genome
+fai <- read_tsv(paste0(ref_genome,".fai"), col_names = FALSE) %>% as_tibble()
+colnames(fai) <- c("LG","len","cum","X1","X2")
+fai <- fai %>% mutate(tot = cumsum(len)-len) %>% dplyr::select(-X1,-X2,-cum)
+
+slw <- 5000 #size sliding window
+IND_vec <- sample_info$IND
+POP_vec <- sample_info$GENETIC_CLUSTER
+```
+#investigate number of private alleles in each cluster
+```{r}
+
+East_inds <- sample_info$IND[which(sample_info$GENETIC_CLUSTER == "East")]
+bim_East <- snpgdsSNPsum(gds = gds,sample.id = East_inds, extended = TRUE)
+
+West_inds <- sample_info$IND[which(sample_info$GENETIC_CLUSTER == "West")]
+bim_West <- snpgdsSNPsum(gds = gds,sample.id = West_inds, extended = TRUE)
+
+bim_ref <- data.frame(East_AC = bim_East$AC_ref,
+                      West_AC = bim_West$AC_ref)
+ref_unique_East <- nrow( bim_ref %>% filter(East_AC == 0 & East_AC > 0) )
+ref_unique_West <- nrow( bim_ref %>% filter(West_AC == 0 & West_AC > 0) )
+
+bim_alt <- data.frame(East_AC = bim_East$AC_alt,
+                      West_AC = bim_West$AC_alt)
+alt_unique_East <- nrow( bim_alt %>% filter(East_AC == 0 & East_AC > 0) )
+alt_unique_West <- nrow( bim_alt %>% filter(West_AC == 0 & West_AC > 0) )
+
+```
+
+```{r}
+LG_list <- list()
+#i<-1
+for(i in 1:24){
+  fai_i <- fai[i,]
+  df_i  <- data.frame(LG    = fai_i$LG,
+                      chr   = as.numeric(str_remove(fai_i$LG,"LG")),
+                      start = seq(1,fai_i$len, by = slw))
+  df_i <- df_i %>% mutate(stop = start + slw,
+                          mid  = start + (stop-start)/2)
+  LG_list[[fai_i$LG]] <- df_i 
+}
+windows_df <- rlist::list.rbind(LG_list)
+windows_df <- left_join(windows_df,fai) %>%
+  arrange(chr, mid) %>%
+  mutate(BPcum  = mid+tot) 
+write_tsv(x=windows_df,file = "windows_df.tsv")
+```
+load files
+```{r include=FALSE}
+###pop stats
+#Tajisma's D
+tjd_East <- list.files(path = glue("{output_dir}/vcftools")   , pattern = paste0(".*","east","\\.Tajima\\.D"), full.names = TRUE) %>% map_df(~read_tsv(.)) %>% mutate(BIN_START = BIN_START+1) %>% dplyr::select(-N_SNPS)
+colnames(tjd_East) <- c("LG","start","tjd")
+tjd_East$pop <- "East"
+tjd_West <- list.files(path = glue("{output_dir}/vcftools")   , pattern = paste0(".*","west","\\.Tajima\\.D"), full.names = TRUE) %>% map_df(~read_tsv(.)) %>% mutate(BIN_START = BIN_START+1) %>% dplyr::select(-N_SNPS)
+colnames(tjd_West) <- c("LG","start","tjd")
+tjd_West$pop <- "West"
+tjd.delta <- data.frame(LG        = tjd_East$LG,
+                        start     = tjd_West$start,
+                        pop1      = "East",
+                        pop2      = "West",
+                        comp      = "East.West",
+                        delta.tjd = tjd_East$tjd-tjd_West$tjd)
+
+
+#pi
+pixy_pi  <- list.files(path = glue("{output_dir}/pixy_output"), pattern = ".*pi\\.txt"  , full.names = TRUE) %>% map_df(~read_tsv(.)) %>% dplyr::select(-window_pos_2)
+colnames(pixy_pi)  <- c("pop","LG","start","pi" ,"N","N_diff","N_comps","N_miss")
+pi_East  <- pixy_pi %>% filter(pop == "East")
+pi_West  <- pixy_pi %>% filter(pop == "West")
+pi_delta <- data.frame(LG       = pi_East$LG,
+                       start    = pi_West$start,
+                       pop1     = "East",
+                       pop2     = "West",
+                       comp     = "East.West",
+                       delta.pi = pi_East$pi-pi_West$pi)
+
+slw_East <- left_join(windows_df,tjd_East)
+slw_East <- left_join(slw_East,pi_East)
+slw_West <- left_join(windows_df,tjd_West)
+slw_West <- left_join(slw_West,pi_West)
+slw_pop  <- rbind(slw_East,slw_West)
+slw_pop  <- slw_pop %>% filter(!is.na(pi))
+
+#comp stats
+#fst
+pixy_fst <- list.files(path = glue("{output_dir}/pixy_output"), pattern = ".*fst\\.txt" , full.names = TRUE) %>% map_df(~read_tsv(.)) %>% dplyr::select(-window_pos_2)
+colnames(pixy_fst) <- c("pop1","pop2","LG","start","fst","N_fst")
+pixy_fst$comp <- "East.West"
+
+#dxy
+pixy_dxy <- list.files(path = glue("{output_dir}/pixy_output"), pattern = ".*dxy\\.txt" , full.names = TRUE) %>% map_df(~read_tsv(.)) %>% dplyr::select(-window_pos_2)
+colnames(pixy_dxy) <- c("pop1","pop2","LG","start","dxy","N_dxy","N_diff","N_comps","N_miss")
+pixy_dxy$comp <- "East.West"
+
+slw_comp <- left_join(windows_df, pixy_fst)
+slw_comp <- left_join(slw_comp,pixy_dxy)
+slw_comp <- left_join(slw_comp,tjd.delta)
+slw_comp <- left_join(slw_comp,pi_delta)
+slw_comp  <- slw_comp %>% filter(!is.na(fst))
+```
+
+```{r}
+#plotting aesthetics
+pop_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(1:4)]) 
+comp_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+
+#axis showing linkage groups
+axisdf = windows_df %>% group_by(chr) %>% summarize(center =(max(BPcum) + min(BPcum) ) / 2 
+                                                 ,start  = min(BPcum)
+                                                 ,stop   = max(BPcum)
+                                                 ,ymin   = -50
+                                                 ,ymax   = 1000)
+x_scale    <- scale_x_continuous(label=axisdf$chr,breaks = axisdf$center,expand=c(0,0))
+x_scale_lg <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,2))
+x_scale_cp <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,0.2))
+
+#genome rectangles
+bg_rect <- annotate("rect", xmin = axisdf$start, xmax = axisdf$stop, 
+    ymin = axisdf$ymin, ymax = axisdf$ymax, alpha = .5, fill = rep(c("darkgrey","white"),20)[1:nrow(axisdf)] )
+
+#reduced aesthetics for most plots
+theme_adj  <- theme(axis.title.x        = element_blank(),
+                    axis.text.x         = element_blank(),
+                    axis.ticks.x.bottom = element_blank(),
+                    panel.grid          = element_blank(),
+                    axis.line.y.left    = element_line(),
+                    axis.text.y         = element_text(size = 10),
+                    axis.title.y        = element_text(size = 15),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"))
+ 
+#modified aesthetics for last plot 
+theme_last <- theme(panel.grid  = element_blank(),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"),
+                    axis.text.x = element_text(angle = 0, size = 18),
+                    axis.title.x = element_text(size = 14, face = "bold"))
+```
+
+#load annotation files
+```{r}
+
+LG_lenghs <- chr_info(bim)
+
+#annotation file male
+annot_male <- fread(annot_male_path,header = T)
+scaf_names <- paste0("LG",1:24)
+annot_male <- subset(annot_male, ScaffoldName %in% scaf_names) %>% arrange(ScaffoldName, FromPosition) %>%
+                         mutate(chr = as.integer(str_remove(ScaffoldName, "LG"))
+                               ,mid = (FromPosition + ToPosition)/2  
+                               ,GeneAccAlt = str_extract(GeneAccession, "^[[:graph:]]*"))
+annot_male <- left_join(annot_male,LG_lenghs, by=c("chr"="LG")) %>%
+  # Add a cumulative position of each SNP
+  arrange(chr, mid) %>%
+  mutate(BPcum_mid  =mid+tot
+        ,BPcum_start=FromPosition+tot
+        ,BPcum_end  =ToPosition+tot)
+#annotation file female
+annot_female <- fread(annot_female_path,header = T)
+scaf_names <- paste0("LG",1:24)
+annot_female <- subset(annot_female, ScaffoldName %in% scaf_names) %>% arrange(ScaffoldName, FromPosition) %>%
+                         mutate(chr = as.integer(str_remove(ScaffoldName, "LG"))
+                               ,mid = (FromPosition + ToPosition)/2  
+                               ,GeneAccAlt = str_extract(GeneAccession, "^[[:graph:]]*"))
+annot_female <- left_join(annot_female,LG_lenghs, by=c("chr"="LG")) %>%
+  # Add a cumulative position of each SNP
+  arrange(chr, mid) %>%
+  mutate(BPcum_mid  =mid+tot
+        ,BPcum_start=FromPosition+tot
+        ,BPcum_end  =ToPosition+tot)
+###################################################
+annot_both <- dplyr::inner_join(annot_female,annot_male) %>% mutate(sex = "both")
+annot_mal  <- dplyr::anti_join(annot_male,annot_female) %>% mutate(sex = "male")
+annot_fem  <- dplyr::anti_join(annot_female,annot_male) %>% mutate(sex = "female") 
+annot_file <- bind_rows(annot_both,annot_fem,annot_mal) %>% arrange(BPcum_start)
+```
+```{r, fig.height=4, fig.width=20}
+pixy_fst_log <- dplyr::filter(pixy_fst, !is.na(fst)) 
+pixy_fst_log$fst_adj <- pixy_fst_log$fst + (-min(pixy_fst_log$fst)+0.00001) #added a small number to prevent div by 0 error
+#pixy_fst_log$fst[which(pixy_fst_log$fst < 0)] <- 1e-4
+quantile(pixy_fst_log$fst_adj)
+pixy_fst_log$fst_log <- log(pixy_fst_log$fst_adj)
+
+png(file = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_fst_log_transform.png"), height = 8, width = 8, units = "in", res = 300)
+par(mfrow = c(2, 1))
+  hist(pixy_fst_log$fst_adj, breaks = seq(0,0.4,0.001), main = "histogram fst estimates")
+  hist(pixy_fst_log$fst_log, breaks = seq(-16,0,0.1), main = "histogram log_transformed fst estimates")
+dev.off()
+
+calc_zscore <- function(x){(x-mean(x, na.rm = TRUE))/sd(x, na.rm = TRUE)}
+zscore      <- calc_zscore(pixy_fst_log$fst_log) 
+pixy_fst_log$zscore <- zscore
+pixy_fst_log$zscore_abs <- abs(zscore)
+mean <- mean(pixy_fst_log$zscore, na.rm = TRUE)
+  sd <-   sd(pixy_fst_log$zscore, na.rm = TRUE)
+pixy_fst_log$pvalue <- pnorm(pixy_fst_log$zscore, mean = mean , sd = sd, lower.tail = FALSE)
+#pixy_fst_log$pvalue[which(pixy_fst_log$pvalue > 1)] <- 1
+qvalue <- qvalue::qvalue(pixy_fst_log$pvalue)
+plot(qvalue)
+qvalue$pi0.lambda
+pixy_fst_log$qvalue <- qvalue$qvalues 
+
+hist(pixy_fst_log$pvalue)
+shapiro.test(sample(pixy_fst_log$fst_log, 5000))
+qqnorm(pixy_fst_log$fst_log)
+
+pixy_fst_log <- left_join(windows_df, pixy_fst_log) %>% dplyr::filter(!is.na(fst))
+
+#extract regions of interest
+ROI <- pixy_fst_log %>% filter(qvalue < 0.05)
+#give first row #1 leaving the rest empty
+ROI$roi <- NA
+ROI$roi[1] <- 1
+#set distance of how many of how many basepairs regions of interest have to be removed in order to be seperated 
+dis <- 50000
+
+#groups sliding windows to ROI groups using two IF else statements
+#1) checks if the roi in the subsequent row is a different chromosome, if so a new ROI is assigned to that row
+#2) if on the same chromosome, is that sliding window further away than the set distance (dis), if so a new ROI is assigned to that row
+for(i in 1:(nrow(ROI)-1)){
+  if(ROI$LG[i] ==  ROI$LG[i+1]){
+     if( (ROI$mid[i+1] - ROI$mid[i]) > dis ){
+       ROI$roi[i+1] <- ROI$roi[i]+1  
+     } else {
+       ROI$roi[i+1] <- ROI$roi[i]
+     }
+  } else {
+    ROI$roi[i+1] <- ROI$roi[i]+1
+  }
+}
+write_tsv(ROI, file = glue("{output_dir}/pixy_output/ROI.tsv"))
+
+#summarize regions of interest and add plotting information
+#the final filter allows you to set how many sliding windows are required to keep a ROI
+#for example, when set to 2, ROIs consisting of a single slising window are removed
+ROI_sum <- ROI %>% group_by(roi) %>% summarise(LG    = first(LG),
+                                               chr   = first(chr),
+                                               start = min(start),
+                                               stop  = max(stop) , 
+                                               N = n())                      %>%
+                                     left_join(. , fai)                      %>%
+                                     mutate(mid  = start + (stop-start)/2,
+                                            cum_start = start + tot,
+                                            cum_mid   = mid   + tot,
+                                            cum_stop  = stop  + tot,
+                                            size = stop-start)               %>%
+                                     filter(N >= 4)
+ROI_sum <- mutate(ROI_sum,roi = 1:nrow(ROI_sum))
+write_tsv(ROI_sum, file = glue("{output_dir}/pixy_output/ROI_sum.tsv"))
+
+
+#create rectangle for rois in Manhattan plot
+#the 300000 added is make the windows fit aesthetically, this has nothing to do with the width of the region of interest
+slc_rect <- annotate("rect", xmin = ROI_sum$cum_start-300000, xmax = ROI_sum$cum_stop+300000, 
+    ymin = rep(-50,length(nrow(ROI_sum))), ymax = rep(1000,length(nrow(ROI_sum))), alpha = 0.7, fill = "black", color = "NA")
+
+fst <- ggplot(pixy_fst_log, aes(x=BPcum)) + bg_rect + slc_rect +
+  #geom_hline(yintercept = 0.15, linetype = "dashed") +
+  geom_point(aes(y=fst,color=comp), size = 0.5) +
+  geom_point(data = . %>% filter(qvalue < 0.05), aes(y=fst), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group")+
+    coord_cartesian(ylim = c(min(pixy_fst_log$fst,na.rm =T),max(pixy_fst_log$fst,na.rm =T)))+
+    ylab(expression(italic(F)[ST]))+ comp_cols + theme_bw() + x_scale + theme_adj
+```
+
+```{r, fig.height=4, fig.width=20}
+theme_single <- theme(panel.grid  = element_blank(),
+                    axis.text.x = element_text(angle = 0, size = 18),
+                    axis.title.x = element_text(size = 14, face = "bold"))
+
+
+ggplot(pixy_fst_log, aes(x=BPcum)) + bg_rect + slc_rect +
+  #geom_hline(yintercept = 0.15, linetype = "dashed") +
+  geom_point(aes(y=fst,color=comp), size = 0.5) +
+  geom_point(data = . %>% filter(qvalue < 0.05), aes(y=fst), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group")+
+    coord_cartesian(ylim = c(min(pixy_fst_log$fst,na.rm =T),max(pixy_fst_log$fst,na.rm =T)))+
+    ylab(expression(italic(F)[ST]))+ comp_cols + theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_FST_1000dpi.png"), width = 20, height = 4, units = "in", dpi = 1000)
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_FST_1000dpi.svg"), width = 20, height = 4, units = "in")
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_FST_1000dpi.pdf"), width = 20, height = 4, units = "in")
+
+
+
+
+```
+
+
+
+```{r, fig.width=20}
+pi   <- ggplot(slw_pop, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=pi, color = pop), size = 0.5, alpha = 0.25) +
+  labs(color = "Genetic Cluster") +
+  coord_cartesian(ylim = c(min(slw_pop$pi,na.rm =T),max(slw_pop$pi,na.rm =T))) +
+  ylab(expression(pi))+ pop_cols + theme_bw() + x_scale + theme_adj
+
+dpi  <- ggplot(slw_comp, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=delta.pi, color = comp), size = 0.5) +
+  labs(color = "Comparison") +
+  coord_cartesian(ylim = c(min(slw_comp$delta.pi,na.rm =T),max(slw_comp$delta.pi,na.rm =T))) +
+  ylab(expression(Delta*pi))+ comp_cols + theme_bw() + x_scale + theme_adj
+
+#fst <- ggplot(pixy_fst_log, aes(x=BPcum)) + bg_rect + slc_rect +
+#  geom_point(aes(y=fst,color=comp), size = 0.5) +
+#  geom_point(data = . %>% filter(qvalue < 0.05), aes(y=fst), size=1, color="red") +
+#  labs(color = "Comparison") +
+#    coord_cartesian(ylim = c(min(pixy_fst_log$fst,na.rm =T),max(pixy_fst_log$fst,na.rm =T)))+
+#    ylab(expression(italic(F)[ST]))+ comp_cols + theme_bw() + x_scale + theme_adj
+
+dxy <- ggplot(slw_comp,aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=dxy,color=comp), size = 0.5) +
+  labs(color = "Comparison") +
+  coord_cartesian(ylim = c(min(slw_comp$dxy,na.rm =T),max(slw_comp$dxy,na.rm =T)))+
+  ylab(expression(italic(d)[xy]))+ comp_cols + theme_bw() + x_scale + theme_adj
+
+dTD  <- ggplot(slw_comp,aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=delta.tjd,color=comp), size = 0.5) +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+  coord_cartesian(ylim = c(min(slw_comp$delta.tjd,na.rm =T),max(slw_comp$delta.tjd,na.rm =T)))+
+  ylab(expression(Delta*D[T]))+ comp_cols + theme_bw() + x_scale + theme_last
+  
+TD   <- ggplot(slw_pop,aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=tjd,color=pop), size = 0.5, alpha = 0.25 ) +
+  labs(color = "Genetic Cluster") +
+  xlab("Linkage Group") +
+  coord_cartesian(ylim = c(min(slw_pop$tjd,na.rm =T),max(slw_pop$tjd,na.rm =T))) +
+  ylab(expression(D[T])) + pop_cols + theme_bw() + x_scale + theme_adj
+
+all <- pi / fst / dxy / TD / dTD +
+      plot_layout(guides    = "collect") & 
+      theme(legend.title    = element_text(size = 20,face = "bold"),
+            legend.text     = element_text(size = 15),
+            legend.position = 'top') & 
+      guides(color = guide_legend(override.aes = list(size = 7, alpha=1)))
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_1000dpi.png")
+      ,plot =  all, dpi = 1000, height = 7, width = 20, units = "in")
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_1000dpi.pdf")
+      ,plot =  all, dpi = 1000, height = 7, width = 20, units = "in")
+ggsave(filename = glue("{output_dir}/pixy_output/plots/{data_set}_{filter}_slw{slw}_genome_scan_1000dpi.svg")
+      ,plot =  all, dpi = 1000, height = 7, width = 20, units = "in")
+
+```
+
+plot seperate LGs
+```{r,  fig.width = 20, fig.height = 8}
+dir.create(glue("{output_dir}/LG"),recursive = T)
+for(i in 1:24){
+LG_pop  <- filter(slw_pop ,chr == i)
+LG_comp <- filter(slw_comp,chr == i)
+# areas of interest
+pi_LG   <- ggplot(LG_pop, aes(x=mid/10^6)) + 
+  geom_point(aes(y=pi,color=pop), size = 1) + 
+  coord_cartesian(ylim = c(min(LG_pop$pi,na.rm =T),max(LG_pop$pi,na.rm =T))) +
+  ylab(expression(pi))+ pop_cols + x_scale_lg + theme_bw() + theme_adj
+
+fst_LG  <- ggplot(LG_comp,aes(x=mid/10^6)) +
+  geom_point(aes(y=fst,color=comp), size = 1) +
+  coord_cartesian(ylim = c(min(slw_comp$fst,na.rm =T),max(slw_comp$fst,na.rm =T)))+
+  ylab(expression(italic(F)[ST]))+ comp_cols + x_scale_lg + theme_bw() + theme_adj
+
+dxy_LG  <- ggplot(LG_comp,aes(x=mid/10^6)) + 
+  geom_point(aes(y=dxy,color=comp), size = 1) +
+  coord_cartesian(ylim = c(min(LG_comp$dxy,na.rm =T),max(LG_comp$dxy,na.rm =T)))+
+  ylab(expression(italic(d)[xy]))+ comp_cols + x_scale_lg + theme_bw() + theme_adj 
+
+dxy_LG_lim  <- ggplot(LG_comp,aes(x=mid/10^6)) + 
+  geom_point(aes(y=dxy,color=comp), size = 1) +
+  coord_cartesian(ylim = c(min(slw_comp$dxy,na.rm =T),0.01))+
+  ylab(expression(italic(d)[xy]))+ comp_cols + x_scale_lg + theme_bw() + theme_adj 
+  
+dTD_LG  <- ggplot(LG_comp,aes(x=mid/10^6)) + 
+  geom_point(aes(y=delta.tjd,color=comp), size = 1) +
+  coord_cartesian(ylim = c(min(LG_comp$delta.tjd,na.rm =T),max(LG_comp$delta.tjd,na.rm =T)))+
+  ylab(expression(Delta*D[T]))+ comp_cols + x_scale_lg + theme_bw() + theme_adj 
+  
+TD_LG   <- ggplot(LG_pop,aes(x=mid/10^6)) + 
+  geom_point(aes(y=tjd,color=pop), size = 1) +
+  coord_cartesian(ylim = c(min(slw_pop$tjd,na.rm =T),max(slw_pop$tjd,na.rm =T))) +
+  xlab("Base Pairs (Mb)") + ylab(expression(D[T])) + pop_cols + x_scale_lg + theme_bw() + theme_last
+  
+LG  <- pi_LG /  fst_LG / dxy_LG / dxy_LG_lim / dTD_LG / TD_LG + 
+      plot_layout(guides    = "collect") & 
+      plot_annotation(title = paste0("LG",i)) &
+      theme(legend.position = 'bottom'
+           ,legend.title    = element_text(size = 20,face = "bold")
+           ,legend.text     = element_text(size = 15)) & 
+      guides(color = guide_legend(override.aes = list(size = 7)))
+ggsave(filename = glue("{output_dir}/pixy_output/plots/LG/LG{i}_{data_set}_{filter}_slw{slw}_genome_scan.png")
+      ,plot =  LG, dpi = 300, height = 8, width = 20, units = "in")
+}
+```
+
+#extract list of genes located within ROIs and surrounnding flanking region
+```{r,fig.width=20,fig.height=8}
+##create dataframe that containes
+annot_list <- list()
+flank <- 10000 #flanking region size
+for(i in 1:nrow(ROI_sum)){
+  cum_start_i <- ROI_sum$cum_start[i] - flank
+  cum_stop_i  <- ROI_sum$cum_stop[i]  + flank
+  
+  annot_i <- dplyr::filter(annot_file, BPcum_end > cum_start_i & BPcum_start < cum_stop_i )
+  annot_i$roi <- paste0("roi",i)
+  annot_list[[paste0("roi",i)]] <- annot_i
+}
+annot_roi2 <- rlist::list.rbind(annot_list)
+annot_roi3 <- annot_roi2 %>% filter(GeneName != "-")
+write_tsv(x = annot_roi3, file = glue("{output_dir}/pixy_output/Genes_ROIs.tsv"))
+```
+

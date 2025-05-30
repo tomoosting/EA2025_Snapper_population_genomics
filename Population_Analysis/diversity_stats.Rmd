@@ -1,0 +1,412 @@
+---
+title: "bcftools_stats"
+author: "Tom Oosting"
+date: "2024-07-03"
+output: html_document
+---
+
+#load packages
+```{r include=FALSE}
+library(tidyverse)
+library(qvalue)
+library(glue)
+library(runner)
+library(data.table)
+library(scales)
+library(ggpubr)
+library(patchwork)
+library(ggsci)
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+```
+
+```{r}
+Project   <- "snapper"
+data_set  <- "snapper_norm"
+
+#output directory
+output_dir <- glue("D:/Research/Projects/snapper/06_output/{data_set}/bcftools_stats")
+dir.create(output_dir)
+```
+#load files
+```{r}
+#PSC files
+PSC_all      <- read_tsv(glue("{output_dir}/{data_set}_PSC_raw.allsites.tsv"))
+PSC_qc       <- read_tsv(glue("{output_dir}/{data_set}_PSC_qc.tsv"))
+PSC_neutral  <- read_tsv(glue("{output_dir}/{data_set}_PSC_neutral.tsv"))
+PSC_outliers <- read_tsv(glue("{output_dir}/{data_set}_PSC_independant_outliers.tsv"))
+#get samples
+samples      <- PSC_all$sample
+
+#Sample information and population information
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+sample_info <- read_tsv(sample_file)
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND)
+sample_info <- sample_info[match(samples, sample_info$IND),]
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+pops  <- unique(sample_info$POP)
+Npops <- length(pops)
+
+
+###create POP factors to control order of plotting
+###default is alphabetical but you can change the order to, for instance, group certain geographically similar sample locations.
+###check current order:
+#snapper norm
+factor_ord  <- c(8,12,9,7,13,11,2,10,5,1,3,4,6)
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+legend_ord  <- paste0(pops_ord," (",codes_ord,")")
+cluster_ord <- c("East","West")
+
+#set factors
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord ) #norm23
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+#sample_info$LEGEND          <- factor(sample_info$LEGEND         , levels = legend_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+sample_info$CLUSTER_GEO     <- factor(sample_info$CLUSTER_GEO    , levels = cluster_ord)
+sample_info$CLUSTER_GEN     <- factor(sample_info$CLUSTER_GEN    , levels = cluster_ord)
+#create new order for samples based on factor levels created above, for admixture
+sample_info$ORD <- order_INDS(IND = sample_info$IND, FACTOR = sample_info$POP)
+```
+#set aesthetics 
+```{r}
+#here you can set colors for all analyses and they will be constant throughout all figures for consistency 
+hex_codes <- hue_pal()(Npops)
+shapes     <- c(rep(c(15,16,17,18),10))[1:Npops]
+show_col(hex_codes)      
+pop_cols <- sample_info   %>% 
+            group_by(POP) %>% 
+            summarise(N = n()) %>% 
+            mutate(color = hex_codes,
+                   shape = shapes)
+colors <- pop_cols$color
+shapes <- pop_cols$shape
+
+col_East <- pal_nejm("default")(5)[c(1)]
+col_West <- pal_nejm("default")(5)[c(2)]
+col_Comp <- pal_npg("nrc")(5)[c(3)]
+
+cluster_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(1:4)]) 
+comparison_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+
+
+theme_all <- theme_bw() + 
+             theme(axis.ticks.x = element_blank(),
+                   axis.text.x  = element_blank(),
+                   axis.title.x = element_blank())
+```
+
+#mutate dataframes
+```{r}
+#all.sites
+PSC_all <- PSC_all %>% mutate(nHom = nRefHom  + nNonRefHom,
+                              nTot = nHom     + nHets,
+                              Het  = nHets    / nTot,
+                              Miss = nMissing / nTot,
+                              Pop  = sample_info$POP,
+                              Code = sample_info$POP_CODE,
+                              Gen  = sample_info$CLUSTER_GEO,
+                              Ord  = sample_info$ORD)
+#qc
+PSC_qc  <- PSC_qc  %>% mutate(nHom = nRefHom + nNonRefHom,
+                              nTot = nHom    + nHets,
+                              Het  = nHets   / nTot,
+                              Miss = nMissing / nTot,
+                              Pop  = sample_info$POP,
+                              Code = sample_info$POP_CODE,
+                              Gen  = sample_info$CLUSTER_GEO,
+                              Ord  = sample_info$ORD)
+#neutral
+PSC_neutral <- PSC_neutral %>% mutate(nHom = nRefHom + nNonRefHom,
+                                      nTot = nHom    + nHets,
+                                      Het  = nHets   / nTot,
+                                      Miss = nMissing / nTot,
+                                      Pop  = sample_info$POP,
+                                      Code = sample_info$POP_CODE,
+                                      Gen  = sample_info$CLUSTER_GEO,
+                                      Ord  = sample_info$ORD)
+#outliers
+PSC_outliers <- PSC_outliers %>% mutate(nHom = nRefHom + nNonRefHom,
+                                        nTot = nHom    + nHets,
+                                        Het  = nHets   / nTot,
+                                        Miss = nMissing / nTot,
+                                        Pop  = sample_info$POP,
+                                        Code = sample_info$POP_CODE,
+                                        Gen  = sample_info$CLUSTER_GEO,
+                                        Ord  = sample_info$ORD)
+```
+
+#sum tables
+```{r}
+
+mean(PSC_all$Het)
+
+#sum all
+Sum_all <- data.frame(N          = nrow(PSC_all),
+                      H_all      = mean(PSC_all$Het),
+                      H_qc       = mean(PSC_qc$Het),
+                      H_neutral  = mean(PSC_neutral$Het),
+                      H_outliers = mean(PSC_outliers$Het))
+write_tsv(Sum_all, file = glue::glue("{output_dir}/{data_set}_all_sum_stats.tsv"))
+
+#sum Pop
+Sum_Pop_all      <- PSC_all      %>% group_by(Pop) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Pop_qc       <- PSC_qc       %>% group_by(Pop) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Pop_neutral  <- PSC_neutral  %>% group_by(Pop) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Pop_outliers <- PSC_outliers %>% group_by(Pop) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+
+write_tsv(Sum_Pop_all     , file = glue::glue("{output_dir}/{data_set}_all_pop_sum_stats.tsv"))
+write_tsv(Sum_Pop_qc      , file = glue::glue("{output_dir}/{data_set}_qc_pop_sum_stats.tsv"))
+write_tsv(Sum_Pop_neutral , file = glue::glue("{output_dir}/{data_set}_neutral_pop_sum_stats.tsv"))
+write_tsv(Sum_Pop_outliers, file = glue::glue("{output_dir}/{data_set}_outliers_pop_sum_stats.tsv"))
+
+#sum genetic cluster
+Sum_Gen_all      <- PSC_all      %>% group_by(Gen) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Gen_qc       <- PSC_qc       %>% group_by(Gen) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Gen_neutral  <- PSC_neutral  %>% group_by(Gen) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+Sum_Gen_outliers <- PSC_outliers %>% group_by(Gen) %>% summarise(N = n(), Het = mean(Het), Miss = mean(Miss), Dp = mean(`average depth`))
+
+write_tsv(Sum_Gen_all     , file = glue::glue("{output_dir}/{data_set}_all_cluster_sum_stats.tsv"))
+write_tsv(Sum_Gen_qc      , file = glue::glue("{output_dir}/{data_set}_qc_cluster_sum_stats.tsv"))
+write_tsv(Sum_Gen_neutral , file = glue::glue("{output_dir}/{data_set}_neutral_cluster_sum_stats.tsv"))
+write_tsv(Sum_Gen_outliers, file = glue::glue("{output_dir}/{data_set}_outliers_cluster_sum_stats.tsv"))
+```
+
+```{r, fig.width=12, fig.height=6}
+#summary plot all
+Het_all  <- ggplot(PSC_all, aes(x=Ord,y=Het,color = Pop))             + geom_point() + ylab("Heterozygosity")     + labs(col="Sample Location") + theme_all
+Miss_all <- ggplot(PSC_all, aes(x=Ord,y=Miss,color = Pop))            + geom_point() + ylab("Proportion Missing") + labs(col="Sample Location") + theme_all
+Dp_all   <- ggplot(PSC_all, aes(x=Ord,y=`average depth`,color = Pop)) + geom_point() + ylab("Average Depth")      + labs(col="Sample Location") + theme_all
+Het_all / Miss_all / Dp_all + plot_layout(guides = "collect") & plot_annotation('summary plot for all SNPs') & theme(legend.position = 'bottom')
+ggsave(filename = glue("{output_dir}/plots/{data_set}_summary_all.png"), width = 12, height = 6, dpi = 600)
+#summary plot qc
+Het_qc  <- ggplot(PSC_qc, aes(x=Ord,y=Het,color = Pop))             + geom_point() + ylab("Heterozygosity")     + labs(col="Sample Location") + theme_all
+Miss_qc <- ggplot(PSC_qc, aes(x=Ord,y=Miss,color = Pop))            + geom_point() + ylab("Proportion Missing") + labs(col="Sample Location") + theme_all
+Dp_qc   <- ggplot(PSC_qc, aes(x=Ord,y=`average depth`,color = Pop)) + geom_point() + ylab("Average Depth")      + labs(col="Sample Location") + theme_all
+Het_qc / Miss_qc / Dp_qc + plot_layout(guides = "collect") & plot_annotation('summary plot for qc SNPs') & theme(legend.position = 'bottom')
+ggsave(filename = glue("{output_dir}/plots/{data_set}_summary_qc.png"), width = 12, height = 6, dpi = 600) 
+#summary plot neutral
+Het_neutral  <- ggplot(PSC_neutral, aes(x=Ord,y=Het,color = Pop))             + geom_point() + ylab("Heterozygosity")     + labs(col="Sample Location") + theme_all
+Miss_neutral <- ggplot(PSC_neutral, aes(x=Ord,y=Miss,color = Pop))            + geom_point() + ylab("Proportion Missing") + labs(col="Sample Location") + theme_all
+Dp_neutral   <- ggplot(PSC_neutral, aes(x=Ord,y=`average depth`,color = Pop)) + geom_point() + ylab("Average Depth")      + labs(col="Sample Location") + theme_all
+Het_neutral / Miss_neutral / Dp_neutral + plot_layout(guides = "collect") & plot_annotation('summary plot for neutal SNPs') & theme(legend.position = 'bottom')
+ggsave(filename = glue("{output_dir}/plots/{data_set}_summary_neutral.png"), width = 12, height = 6, dpi = 600) 
+#summary plot outliers
+Het_outliers  <- ggplot(PSC_outliers, aes(x=Ord,y=Het,color = Pop))             + geom_point() + ylab("Heterozygosity")     + labs(col="Sample Location") + theme_all
+Miss_outliers <- ggplot(PSC_outliers, aes(x=Ord,y=Miss,color = Pop))            + geom_point() + ylab("Proportion Missing") + labs(col="Sample Location") + theme_all
+Dp_outliers   <- ggplot(PSC_outliers, aes(x=Ord,y=`average depth`,color = Pop)) + geom_point() + ylab("Average Depth")      + labs(col="Sample Location") + theme_all
+Het_outliers / Miss_outliers / Dp_outliers + plot_layout(guides = "collect") & plot_annotation('summary plot for outlier SNPs') & theme(legend.position = 'bottom')
+ggsave(filename = glue("{output_dir}/plots/{data_set}_summary_outliers.png"), width = 12, height = 6, dpi = 600) 
+```
+
+
+
+#box plots
+```{r, fig.width= 4, fig.height= 8}
+anova <- aov(Het ~ Gen, data = PSC_all)                                                                       # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Gen)[which(tukey$Gen[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_all, aes(x=Gen,y=Het, fill = Gen))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +         # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.0)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(col_East,col_West))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_all_Het_clust_boxplot.png"), width = 4, height = 8, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_all_Het_clust_boxplot.svg"), width = 4, height = 8)
+
+anova <- aov(Het ~ Gen, data = PSC_qc)                                                                        # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Gen)[which(tukey$Gen[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_qc, aes(x=Gen,y=Het, fill = Gen))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +          # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(col_East,col_West))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_qc_Het_clust_boxplot.png"), width = 4, height = 8, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_qc_Het_clust_boxplot.svg"), width = 4, height = 8)
+
+anova <- aov(Het ~ Gen, data = PSC_neutral)                                                                   # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Gen)[which(tukey$Gen[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_neutral, aes(x=Gen,y=Het, fill = Gen))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +     # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(col_East,col_West))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_neutral_Het_clust_boxplot.png"), width = 4, height = 8, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_neutral_Het_clust_boxplot.svg"), width = 4, height = 8)
+
+anova <- aov(Het ~ Gen, data = PSC_outliers)                                                                  # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Gen)[which(tukey$Gen[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_outliers, aes(x=Gen,y=Het, fill = Gen))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +    # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(col_East,col_West))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_outliers_Het_clust_boxplot.png"), width = 4, height = 8, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_outliers_Het_clust_boxplot.svg"), width = 4, height = 8)
+```
+
+```{r, fig.width= 12, fig.height= 6}
+anova <- aov(Het ~ Pop, data = PSC_all)                                                                       # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Pop)[which(tukey$Pop[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_all, aes(x=Pop,y=Het, fill = Pop))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +         # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.0)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_all_Het_pops_boxplot.png"), width = 12, height = 6, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_all_Het_pops_boxplot.svg"), width = 12, height = 6)
+
+anova <- aov(Het ~ Pop, data = PSC_qc)                                                                        # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Pop)[which(tukey$Pop[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_qc, aes(x=Pop,y=Het, fill = Pop))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +          # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_qc_Het_pops_boxplot.png"), width = 12, height = 6, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_qc_Het_pops_boxplot.svg"), width = 12, height = 6)
+
+anova <- aov(Het ~ Pop, data = PSC_neutral)                                                                   # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Pop)[which(tukey$Pop[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_neutral, aes(x=Pop,y=Het, fill = Pop))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +     # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_neutral_Het_pops_boxplot.png"), width = 12, height = 6, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_neutral_Het_pops_boxplot.svg"), width = 12, height = 6)
+
+anova <- aov(Het ~ Pop, data = PSC_outliers)                                                                  # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$Pop)[which(tukey$Pop[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(PSC_outliers, aes(x=Pop,y=Het, fill = Pop))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +    # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+ggsave(filename = glue("{output_dir}/plots/{data_set}_outliers_Het_pops_boxplot.png"), width = 12, height = 6, dpi = 600)
+ggsave(filename = glue("{output_dir}/plots/{data_set}_outliers_Het_pops_boxplot.svg"), width = 12, height = 6)
+```
+
+
+
+
+DP raw vs norm
+```{r}
+
+library(qvalue)
+
+samtools_df <- read_tsv(glue("D:/Research/Projects/snapper/06_output/{data_set}/bam_stats/DP_SUM.tsv"))
+samtools_df$POP <- factor(samtools_df$POP, levels = pops_ord)
+
+
+mean_raw  <- mean(samtools_df$DP_raw)
+mean_norm <- mean(samtools_df$DP_norm)
+
+
+calc_zscore <- function(x){(x-mean(x, na.rm = TRUE))/sd(x, na.rm = TRUE)}
+zscore      <- calc_zscore(samtools_df$DP_raw) 
+samtools_df$zscore <- zscore
+samtools_df$zscore_abs <- abs(zscore)
+mean <- mean(samtools_df$zscore, na.rm = TRUE)
+  sd <-   sd(samtools_df$zscore, na.rm = TRUE)
+samtools_df$pvalue <- pnorm(samtools_df$zscore, mean = mean , sd = sd, lower.tail = FALSE)
+#pixy_fst_log$pvalue[which(pixy_fst_log$pvalue > 1)] <- 1
+#qvalue <- qvalue::qvalue(samtools_df$pvalue)
+#plot(qvalue)
+#qvalue$pi0.lambda
+#pixy_fst_log$qvalue <- qvalue$qvalues 
+
+samtools_df$IND[which(samtools_df$pvalue < 0.05)]
+
+t.test(samtools_df$DP_raw, alternative = "greater", mu = mean_raw)
+
+
+
+ggplot(samtools_df, aes(x= IND, y= DP_raw, color= POP))+
+  geom_point() + 
+  theme_bw()
+
+
+anova <- aov(DP_raw ~ POP, data = samtools_df)                                                                # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$POP)[which(tukey$POP[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+```
+```{r, fig.width=12 , fig.height=6}
+ggplot(samtools_df, aes(x=POP,y=DP_raw, fill = POP))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +    # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+
+samtools_df <- samtools_df %>% arrange(POP, IND)
+samtools_df$IND <- factor(samtools_df$IND, levels = samtools_df$IND)
+
+p1 <- ggplot(samtools_df, aes(x=IND,y=DP_raw, color = POP))+
+  geom_point()+
+  theme_bw()+
+  xlab("Individual")+
+  ylab("Depth raw")+
+  theme(axis.text.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.ticks = element_blank())
+p2 <- ggplot(samtools_df, aes(x=IND,y=DP_norm, color = POP))+
+  geom_point()+
+  theme_bw()+
+  xlab("Individual")+
+  ylab("Depth normalised")+
+  theme(axis.text.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.ticks = element_blank())
+
+p <- p1 / p2 +
+      plot_layout(guides    = "collect") & 
+      theme(legend.title    = element_text(size = 10,face = "bold"),
+            legend.text     = element_text(size = 7),
+            legend.position = 'bottom') & 
+      guides(color = guide_legend(override.aes = list(size = 3, alpha=1)))
+ggsave(plot = p, filename = glue("{output_dir}/plots/{data_set}_sequencing_depth_normalised.png"), height = 6, width = 12, dpi = 600)
+ggsave(plot = p, filename = glue("{output_dir}/plots/{data_set}_sequencing_depth_normalised.pdf"), height = 6, width = 12)
+ggsave(plot = p, filename = glue("{output_dir}/plots/{data_set}_sequencing_depth_normalised.svg"), height = 6, width = 12)
+
+```
+
+```{r}
+anova <- aov(DP_norm ~ POP, data = samtools_df)                                                                  # Perform ANOVA to see if heterpzygosity is significantly different between populations
+tukey <- TukeyHSD(anova)                                                                                      # if so, which comparisons are significant
+tukey_list <- str_split(rownames(tukey$POP)[which(tukey$POP[,4] < 0.05)],"-")                                 # create list of significant comparisons
+summary(anova)                                                                                                # summary
+plot(anova, 2)                                                                                                # check normality - you can only do this if heterozygosity is normally distributed
+ggplot(samtools_df, aes(x=POP,y=DP_norm, fill = POP))+ geom_boxplot() + #coord_cartesian(ylim = c(0.2,0.6)) +    # plot boxplot showing significant comparisons
+  geom_signif(comparisons = tukey_list, map_signif_level = FALSE, test = "wilcox.test", step_increase = 0.1)+ # TRUE plots ***, FALSE plots p-values
+  scale_fill_manual(values = c(colors))+
+  labs(x = "Sample Location", y = "Heterozygosity")+ theme_bw()
+
+
+
+samtools_sum <- samtools_df %>% group_by(POP) %>% summarise(DP_raw  = mean(DP_raw , na.rm = T),
+                                                            DP_norm = mean(DP_norm, na.rm = T))
+
+
+```
+
+
+
+

@@ -1,0 +1,163 @@
+---
+title: "newhybrids_plots"
+author: "Tom Oosting"
+date: "2024-07-10"
+output: html_document
+---
+
+#load packages
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(stringr)
+library(glue)
+library(boot)
+
+###plotting
+library(ggplot2)
+library(ggsignif)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(ggpubr)
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+project       <- "snapper"
+data_set      <- "snapper_norm"
+filter        <- "independant_outliers"
+analyses      <- "_named"
+sample_file   <- glue("D:/Research/Projects/{project}/01_sample_information/snapper.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/{project}/05_data/{data_set}/{data_set}_{filter}")
+
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}/newhybrids/{data_set}_{filter}{analyses}")
+dir.create(output_dir)
+```
+#load data
+```{r}
+sample_info <- read_tsv(sample_file)
+
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+cluster_ord <- c("East","West")
+
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord )
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+
+#get population metrics
+pops <- unique(sample_info$GENETIC_CLUSTER)
+Npops <- length(pops)
+```
+
+
+#Pi
+```{r}
+#averages
+Pi_aves_file <- list.files(output_dir,pattern = "aa.Pi.aves", full.names = TRUE)
+Pi_aves <- read_tsv(Pi_aves_file)
+
+#histogram
+Pi_hist_file <- list.files(output_dir,pattern = "aa.Pi.hist", full.names = TRUE)
+Pi_hist <- read.table(Pi_hist_file, sep = "" , header = T ,  na.strings ="")
+Pi_hist <- Pi_hist[,-1]
+Pi_hist <-as.data.frame(t(Pi_hist))
+colnames(Pi_hist) <- c("Pure_NE", "Pure_SW", "F1", "F2", "NE_Bx", "SW_Bx")
+Pi_hist$post_prob <- c(0,seq(0.005,0.995,0.01),1)
+Pi_hist <- Pi_hist[,c(7,1,2,3,4,5,6)]
+
+Pi_hist_long  <-pivot_longer(Pi_hist, cols = colnames(Pi_hist[,2:ncol(Pi_hist)]),
+                             names_to      = "Class",
+                             values_to     = "Frequency")
+Pi_hist_long$Class <- factor(Pi_hist_long$Class, levels = c("Pure_NE", "Pure_SW", "NE_Bx", "SW_Bx", "F1", "F2"))
+colors <- c("darkred","darkblue","red","blue","purple","violet")
+
+ggplot(Pi_hist_long, aes(x=post_prob, y= Frequency, color = Class, fill = Class))+
+  geom_vline(xintercept = Pi_aves$PosteriorMeanPi, linetype = "dashed")+
+  geom_area(alpha = 0.7)+
+  geom_point()+
+  scale_fill_manual(values = colors)+
+  scale_color_manual(values = colors)+
+  xlab("posterior probability")+
+  ylab("Frequency") +
+  #coord_cartesian(xlim = c(0,0.55))+
+  theme_bw()
+ggsave(filename = glue("{output_dir}/Pi_histogram.png"))
+
+```
+
+PofZ
+```{r, fig.height=5, fig.width=20}
+PofZ_file <- list.files(output_dir,pattern = "aa-PofZ.txt", full.names = TRUE)
+PofZ <- read_tsv(PofZ_file)
+PofZ <- PofZ[,-1]
+colnames(PofZ) <- c("IND","Pure_NE", "Pure_SW", "F1", "F2", "NE_Bx", "SW_Bx")
+
+
+
+PofZ_long       <- pivot_longer(PofZ, cols = colnames(PofZ[,2:ncol(PofZ)]), names_to = "Class", values_to = "Prob")
+PofZ_long$Class <- factor(PofZ_long$Class, levels = c("Pure_NE", "Pure_SW", "NE_Bx", "SW_Bx", "F1", "F2"))
+colors <- c("darkred","darkblue","red","blue","purple","violet")
+PofZ_long       <- left_join(PofZ_long,sample_info[,c(2,3,9)])
+
+PofZ_long_grouped <- PofZ_long %>% dplyr::arrange(POP, IND)
+IND_Ord <-  unique(PofZ_long_grouped$IND )
+PofZ_long_grouped$IND <- factor(PofZ_long_grouped$IND, levels = IND_Ord)
+
+
+sample_sum <- sample_info %>% group_by(POP_CODE) %>% summarise(N = n()) %>% mutate(bar = cumsum(N)+.5, text_x = cumsum(N)-(N/2))
+
+ggplot(data = PofZ_long_grouped,aes(y=Prob, x= IND))+
+  geom_col(aes(fill = Class, color = Class),position = position_stack(reverse = TRUE))+
+  geom_segment(data = sample_sum, aes(x = bar, y = -0.05, yend = 1), size = 1.5)+
+  coord_cartesian(ylim = c(-0.05,1), expand = FALSE)+
+  geom_text(data = sample_sum, aes(x = text_x , y = -0.02, label = POP_CODE), size = 6)+
+  scale_fill_manual(values = colors)+
+  scale_color_manual(values = colors)+
+  ylab("Probability")+
+  theme_bw()+
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "top")
+ggsave(filename = glue("{output_dir}/class_prob_barstacked.png"), width = 20, height = 5, dpi = 600)
+ggsave(filename = glue("{output_dir}/class_prob_barstacked.svg"), width = 20, height = 5)
+ggsave(filename = glue("{output_dir}/class_prob_barstacked.pdf"), width = 20, height = 5 )
+
+PofZ_max <- PofZ_long %>% group_by(IND) %>% top_n(1, Prob)
+write_tsv(PofZ_max, file = glue("{output_dir}/sample_max_GenotypeFrequencyClass.tsv"))
+PofZ_sum <- PofZ_max  %>% group_by(Class) %>% summarise(N = n())
+write_tsv(PofZ_sum, file = glue("{output_dir}/sum_GenotypeFrequencyClass.tsv"))
+
+```
+
+
+
+
+PofZ by cluster
+```{r}
+IND_east             <- filter(sample_info, GENETIC_CLUSTER == "East") %>% pull(IND) 
+PofZ_east            <- filter(PofZ, IND %in% IND_east) 
+PofZ_east_long       <- pivot_longer(PofZ_east, cols = colnames(PofZ[,2:ncol(PofZ)]), names_to = "Class", values_to = "Prob")
+PofZ_east_long$Class <- factor(PofZ_east_long$Class, levels = c("Pure_0", "Pure_1", "F1", "F2", "0_Bx", "1_Bx"))
+PofZ_east_long       <- left_join(PofZ_east_long,sample_info[,c(2,3,9)])
+  
+IND_west       <- filter(sample_info, GENETIC_CLUSTER == "West") %>% pull(IND)   
+PofZ_west      <- filter(PofZ, IND %in% IND_west)
+PofZ_west_long <- pivot_longer(PofZ_west, cols = colnames(PofZ[,2:ncol(PofZ)]), names_to = "Class", values_to = "Prob")
+PofZ_west_long$Class <- factor(PofZ_west_long$Class, levels = c("Pure_0", "Pure_1", "F1", "F2", "0_Bx", "1_Bx"))
+PofZ_west_long       <- left_join(PofZ_west_long,sample_info[,c(2,3,9)])
+
+```
+
+

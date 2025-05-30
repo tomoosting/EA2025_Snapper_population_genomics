@@ -1,0 +1,196 @@
+---
+title: "Population Analyses SNP data"
+author: "Tom Oosting"
+date: '2023-08-10'
+output: html_document
+---
+#load packages
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(stringr)
+library(glue)
+library(boot)
+
+###plotting
+library(ggplot2)
+library(ggsignif)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(ggpubr)
+
+###SNPdata
+library(SNPRelate)
+library(gdsfmt)
+library(dartR)
+library(reshape2)
+library(gdistance)
+
+###spatial
+library(sf)
+library(raster)
+
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+project       <- "snapper"
+data_set      <- "snapper_norm"
+filter        <- "neutral"
+grouping      <- "SITE"
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}")
+```
+
+#load data
+```{r}
+#read gds snprelate
+gds <- snpgdsReadGDS(gds_file = paste0(SNP_ext,".gds")) #gdsfmt::closefn.gds(gds) if you need to close the gds file
+
+#extract locus information
+bim <- snpgdsSNPsum(gds = gds, extended = TRUE)
+
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+samples     <- read.gdsn(index.gdsn(gds, "sample.id"))
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND) %>% mutate(LEGEND = as.character(glue("{POP} ({POP_CODE})")))
+sample_info <- sample_info[match(samples, sample_info$IND),]
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+#strata(genlight) <- sample_info # needs adegenet
+
+#get population metrics
+pops  <- sort(unique(sample_info$POP))
+Npops <- length(pops)
+pop_combs <- as.data.frame(t(utils::combn(pops,2)))
+pop_combs <- pop_combs %>% mutate(merge = paste(V1,V2,sep = "."))
+colnames(pop_combs) <- c("pop1","pop2","combID")
+combs <- pop_combs$merge
+N_comb <- nrow(pop_combs)
+
+###create POP factors to control order of plotting
+###deault is alphabetical but you can change the order to, for instance, group certain geographically similar sample locations.
+###check current order:
+#snapper_norm
+factor_ord  <- c(8,12,9,7,13,11,2,10,5,1,3,4,6)
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+legend_ord  <- paste0(pops_ord," (",codes_ord,")")
+cluster_ord <- c("East","West")
+
+
+#set factors
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord )
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+sample_info$LEGEND          <- factor(sample_info$LEGEND         , levels = legend_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+#create new order for samples based on factor levels created above, for admixture
+sample_info$ORD <- order_INDS(IND = sample_info$IND, FACTOR = sample_info$POP)
+```
+#set colors and shapes 
+```{r}
+#here you can set colors for all analyses and they will be constant throughout all figures for consistency 
+hex_codes <- hue_pal()(Npops)
+shapes     <- c(rep(c(15,16,17,18),10))[1:Npops]
+show_col(hex_codes)      
+pop_cols <- sample_info   %>% 
+            group_by(POP) %>% 
+            summarise(N = n()) %>% 
+            mutate(color = hex_codes,
+                   shape = shapes)
+colors <- pop_cols$color
+shapes <- pop_cols$shape
+
+col_East <- pal_nejm("default")(5)[c(1)]
+col_West <- pal_nejm("default")(5)[c(2)]
+col_Comp <- pal_npg("nrc")(5)[c(3)]
+
+cluster_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(1:4)]) 
+comparison_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+```
+
+#GRM
+```{r, fig.width= 8 , fig.height= 6 }
+dir.create(glue::glue("{output_dir}/PC_analyses"))
+PCA_out <- glue::glue("{output_dir}/PC_analyses/{data_set}_{filter}")
+##############################PCA##################################
+#estimates genetic relationship matrix
+GRM <- snpgdsGRM(gds, sample.id = sample_info$IND, method = "Eigenstrat", autosome.only = FALSE)
+
+#perform and plot PCA with shapes
+png(filename =  glue::glue("{PCA_out}_POP_shapes_GRM.png"), width = 8, height = 4, units = "in", res = 300) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = shapes,
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "right", legend.name = "Sample Location") 
+dev.off()
+
+pdf(file =  glue::glue("{PCA_out}_POP_shapes_GRM.pdf"), width = 8, height = 4) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = shapes,
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "top", legend.name = "Sample Location") 
+dev.off()
+
+svg(filename =  glue::glue("{PCA_out}_POP_shapes_GRM.svg"), width = 8, height = 6) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = shapes,
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "right", legend.name = "Sample Location") 
+dev.off()
+
+#perform and plot PCA
+png(filename =  glue::glue("{PCA_out}_POP_circles_GRM.png"), width = 8, height = 4, units = "in", res = 300) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = rep(16,Npops),
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "right", legend.name = "Sample Location") 
+dev.off()
+
+pdf(file =  glue::glue("{PCA_out}_POP_circles_GRM.pdf"), width = 8, height = 4) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = rep(16,Npops),
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "top", legend.name = "Sample Location") 
+dev.off()
+
+svg(filename =  glue::glue("{PCA_out}_circles_shapes_GRM.svg"), width = 8, height = 6) 
+  PCA_SNA  <- PCA_manual_colors(GRM$grm, sample_info$IND ,sample_info$LEGEND,
+                  1, 2, show.point=T, show.label=F, manual_colors = colors, manual_shapes = rep(16,Npops),
+                  show.ellipse=T, show.line=T, alpha=0, legend.pos = "right", legend.name = "Sample Location") 
+dev.off()
+```
+
+#PCA
+```{r}
+#perform classic PCA - results should the same as the GRM
+pca_snprelate <- snpgdsPCA(gds, autosome.only = FALSE)
+pc.percent <- pca_snprelate$varprop*100
+head(round(pc.percent, 2))
+
+tab <- data.frame(POP        = sample_info$POP,
+                  EV1        = pca_snprelate$eigenvect[,1],    # the first eigenvector
+                  EV2        = pca_snprelate$eigenvect[,2],    # the second eigenvector
+                  stringsAsFactors = FALSE)
+
+
+
+png(filename =  glue::glue("{PCA_out}_PCA.png"), width = 8, height = 4, units = "in", res = 300) 
+  ggplot(tab,aes(x=EV1,y=EV2, color = POP ))+
+    geom_point()+
+    xlab(glue("PC1 ({round(pc.percent[1],2)}%)"))+
+    ylab(glue("PC2 ({round(pc.percent[2],2)}%)"))
+dev.off()
+  
+pca_snprelate_load  <- snpgdsPCASNPLoading(pca_snprelate, gds, num.thread=1L, verbose=TRUE)
+
+#plot loadings
+png(filename =  glue::glue("{PCA_out}_PCA_loadings.png"), width = 8, height = 6, units = "in", res = 300) 
+par(mfrow=c(2,1))
+  plot(pca_snprelate_load$snploading[1,], type="h", ylab="PC 1")
+  plot(pca_snprelate_load$snploading[2,], type="h", ylab="PC 2")
+dev.off()
+```
+

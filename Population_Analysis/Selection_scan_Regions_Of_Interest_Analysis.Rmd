@@ -1,0 +1,542 @@
+---
+title: "ROI_AF_gradient"
+author: "Tom Oosting"
+date: "2024-06-25"
+output: html_document
+---
+
+#load packages
+```{r include=FALSE}
+library(tidyverse)
+library(vcfR)
+library(qvalue)
+library(glue)
+library(runner)
+library(SNPRelate)
+library(SeqArray)
+library(SNPfiltR)
+library(data.table)
+library(scales)
+library(SNPRelate)
+library(gdsfmt)
+library(ggpubr)
+#library(ggpmisc)
+library(ggsci)
+
+source("D:/Research/Scripts/R/functions/SNPrelate_functions.R")
+```
+
+```{r}
+Project   <- "snapper"
+data_set  <- "snapper_norm"
+filter    <- "qc"
+
+ref_genome        <- "D:/Research/Projects/snapper/02_reference_genome/Nuclear/Chrysophrys_auratus.v.1.0.all.assembly.units.fasta"
+#information reference genome
+fai <- read_tsv(paste0(ref_genome,".fai"), col_names = FALSE) %>% as_tibble()
+colnames(fai) <- c("CHR","len","cum","X1","X2")
+fai <- fai %>% mutate(tot = cumsum(len)-len) %>% dplyr::select(-X1,-X2,-cum)
+
+#SNPdata
+snpfile_ext <- glue("D:/Research/Projects/{Project}/05_data/{data_set}/{data_set}_{filter}")
+gds <- snpgdsReadGDS(gds_file = paste0(snpfile_ext,".gds")) #gdsfmt::closefn.gds(gds) if you need to close the gds file
+
+##private alleles
+#pal_east <- read_tsv(glue("D:/Research/Projects/snapper/06_output/{data_set}/private_alleles/{data_set}_east_private_alleles_no_mixing.tsv"))
+#pal_west <- read_tsv(glue("D:/Research/Projects/snapper/06_output/{data_set}/private_alleles/{data_set}_west_private_alleles_no_mixing.tsv"))
+
+#cumulative distance along transect
+trans_dist <- c(0,170,246,322,703,970,1129,1395,1482,1652,1848,1996,2145)
+dist_boundaries <- c(1064,2043)
+
+#pixy output
+ROI     <- read_tsv(glue("D:/Research/Projects/snapper/06_output/{data_set}/genome_scan/pixy_output/ROI.tsv"))
+ROI_sum <- read_tsv(glue("D:/Research/Projects/snapper/06_output/{data_set}/genome_scan/pixy_output/ROI_sum.tsv"))
+
+#output directory
+output_dir <- glue("D:/Research/Projects/snapper/06_output/{data_set}/genome_scan/pixy_output/ROI")
+dir.create(output_dir)
+```
+get sample and SNP information
+```{r}
+#Sample information and population information
+sample_info <- read_tsv(glue::glue("D:/Research/Projects/{Project}/01_sample_information/{Project}.sample_info.tsv"))
+samples <- read.gdsn(index.gdsn(gds, "sample.id"))
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND)
+sample_info <- sample_info[match(samples, sample_info$IND),]
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+cluster_ord <- c("West","East")
+
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord )
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+
+#population summary
+pop_sum <- sample_info %>% group_by(POP) %>%  reframe(Nind = n(),
+                                                      LATH = mean(GPS_LATH, na.rm = TRUE ),
+                                                      LONG = mean(GPS_LONG, na.rm = TRUE ),
+                                                      CLUS = unique(GENETIC_CLUSTER))
+
+#extract locus information
+bim <- snpgdsSNPsum(gds = gds, extended = FALSE)
+bim <- left_join(bim,fai) %>%
+                 arrange(LG, POS) %>%
+                 mutate(BPcum  = POS+tot) %>%
+                 dplyr::select(-tot,-len)
+
+
+trans_dist_df <- data.frame(POP  = factor(pops_ord, levels = pops_ord),
+                            CODE = factor(codes_ord, levels = codes_ord),
+                            DIST = trans_dist,
+                            SIDE = c("W","W","W","W","W","W","W","W","W","E","E","E","E"))
+```
+
+```{r}
+#plotting aesthetics
+pop_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(2,1)]) 
+comp_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+
+#axis showing linkage groups
+axisdf = bim %>% group_by(CHR) %>% summarize(center =(max(BPcum) + min(BPcum) ) / 2 
+                                                 ,start  = min(BPcum)
+                                                 ,stop   = max(BPcum)
+                                                 ,ymin   = -50
+                                                 ,ymax   = 1000)
+x_scale    <- scale_x_continuous(label=axisdf$chr,breaks = axisdf$center,expand=c(0,0))
+x_scale_lg <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,2))
+x_scale_cp <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,0.2))
+
+#genome rectangles
+bg_rect <- annotate("rect", xmin = axisdf$start, xmax = axisdf$stop, 
+    ymin = axisdf$ymin, ymax = axisdf$ymax, alpha = .5, fill = rep(c("darkgrey","white"),20)[1:nrow(axisdf)] )
+
+#reduced aesthetics for most plots
+theme_adj  <- theme(axis.title.x        = element_blank(),
+                    axis.text.x         = element_blank(),
+                    axis.ticks.x.bottom = element_blank(),
+                    panel.grid          = element_blank(),
+                    axis.line.y.left    = element_line(),
+                    axis.text.y         = element_text(size = 10),
+                    axis.title.y        = element_text(size = 15),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"))
+ 
+#modified aesthetics for last plot 
+theme_last <- theme(panel.grid  = element_blank(),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"),
+                    axis.text.x = element_text(angle = 0, size = 18),
+                    axis.title.x = element_text(size = 14, face = "bold"))
+```
+
+
+#obtain the SNP with max FST for each ROI
+```{r, fig.height=16, fig.width=16}
+ROI_fst_max <- as.data.frame(matrix(nrow = 0, ncol = 5))
+ROI_FST_panel <- as.data.frame(matrix(nrow = 0, ncol = 18))
+
+
+bim_ext <- snpgdsSNPsum(gds = gds, extended = TRUE)
+i <- 14
+
+for(i in 1:nrow(ROI_sum)){
+  LG_i    <- ROI_sum$LG[i]
+  START_i <- ROI_sum$start[i]
+  END_i   <- ROI_sum$stop[i]
+  
+  bim_i   <- filter(bim_ext, CHR == LG_i & POS >= START_i & POS <= END_i)
+  
+  fst     <- snpgdsFst(gdsobj         = gds,
+                       snp.id         = bim_i$LOC,
+                       population     = sample_info$GENETIC_CLUSTER,
+                       method         = "W&C84",
+                       autosome.only  = FALSE,
+                       remove.monosnp = TRUE)
+  
+  bim_i$fst <- fst$FstSNP
+  
+  fst_max <- max(bim_i$fst, na.rm = TRUE)
+  pos_max <- bim_i$POS[which(bim_i$fst == fst_max)][1]
+  loc_max <- bim_i$LOC[which(bim_i$fst == fst_max)][1]
+  
+  
+  bim_i$ROI <- c(glue("ROI{i} FSTmax = {LG_i}:{pos_max}"))
+  bim_i$POS_MAX <- FALSE
+  bim_i$POS_MAX[which(bim_i$fst == fst_max)] <- TRUE
+  ROI_FST_panel <- rbind(ROI_FST_panel, bim_i)
+  
+  ROI_vec_i <- data.frame(i, LG_i, pos_max, loc_max, fst_max)
+  ROI_fst_max <- rbind(ROI_fst_max, ROI_vec_i)
+}
+colnames(ROI_fst_max) <- c("ROI", "LG", "POS", "LOC", "FST_max")
+write_tsv(ROI_fst_max,glue("{output_dir}/Positions_max_FST_ROI_snprelate.tsv"))
+
+#these are your snps of interest
+ROI_snps <- ROI_fst_max$LOC
+
+ROI_FST_panel$ROI <- factor(ROI_FST_panel$ROI, levels = unique(ROI_FST_panel$ROI))
+
+ggplot( filter(ROI_FST_panel, MAF > 0.01), aes(x= POS/10^6, y= fst))+
+  geom_point(aes(color = MAF))+
+  geom_point(data = . %>% filter(POS_MAX), color = "red", size = 4, shape = 21)+
+  theme_bw()+
+  xlab("Position SNP (Mbp)")+
+  ylab("FST")+
+  facet_wrap(~ROI, scales = "free_x")  
+ggsave(filename = glue("{output_dir}/ROI_FST_panel.png"), height = 16, width = 16, dpi = 600)
+ggsave(filename = glue("{output_dir}/ROI_FST_panel.pdf"), height = 16, width = 16)
+ggsave(filename = glue("{output_dir}/ROI_FST_panel.svg"), height = 16, width = 16)
+
+```
+
+```{r, fig.height=16, fig.width=16}
+library(SNPRelate)
+
+#i <- 14
+
+LD_sum <- as.data.frame(matrix(ncol = 5,nrow = 0))
+
+for(i in 1:nrow(ROI_sum)){
+ROI_SNP   <- ROI_snps[i]
+ROI_POS   <- as.numeric(str_remove(ROI_SNP,"LG\\d*:"))
+ROI_LG    <- ROI_sum$LG[i]
+ROI_start <- ROI_sum$start[i]
+ROI_stop  <- ROI_sum$stop[i]
+
+ROI_bim   <- filter(bim, CHR == ROI_LG & POS >= ROI_start & POS <= ROI_stop)
+ROI_LOCs  <- ROI_bim$LOC
+ROI_POSs <- ROI_bim$POS
+
+LD <- snpgdsLDMat(gdsobj = gds, snp.id = ROI_LOCs, slide = 0)
+LD_mat <- LD$LD
+rownames(LD_mat) <- ROI_POSs
+colnames(LD_mat) <- ROI_POSs
+
+LD_df <- as.data.frame(as.table(LD_mat))
+LD_df$Var1 <- as.numeric(as.character(LD_df$Var1))
+LD_df$Var2 <- as.numeric(as.character(LD_df$Var2))
+LD_df$dist <- (LD_df$Var2-LD_df$Var1)+ROI_POS
+LD_df <- filter(LD_df, Var1 == ROI_POS & Var2 != ROI_POS)
+LD_df$ROI <- glue("ROI{i} LD: {ROI_SNP}")
+
+LD_sum <- rbind(LD_sum,LD_df)
+
+}
+
+colnames(LD_sum) <- c("SNP1","SNP2","R","POS","ROI")
+LD_sum$ROI <- factor(LD_sum$ROI, levels = unique(LD_sum$ROI))
+
+ggplot(LD_sum, aes(x=POS/10^6, y=R^2))+
+  geom_point()+
+  geom_hline(yintercept = 0.2, color = "darkred", linetype = "dashed", size = 1)+
+  theme_bw()+
+  facet_wrap(~ROI, scales = "free_x") 
+ggsave(filename = glue("{output_dir}/ROI_LD_panel.png"), height = 16, width = 16, dpi = 600)
+ggsave(filename = glue("{output_dir}/ROI_LD_panel.pdf"), height = 16, width = 16)
+ggsave(filename = glue("{output_dir}/ROI_LD_panel.svg"), height = 16, width = 16)
+
+  
+
+```
+
+
+
+#get allele frequencies for each SNP per sample site
+```{r, fig.height=14, fig.width=14}
+FST_max_sum <- snpgdsSNPsum_byPOP(gds    = gds,
+                                  pop.id = sample_info$POP,
+                                  snp.id = ROI_snps)
+FST_max_sum <- left_join(FST_max_sum, pop_sum)
+FST_max_sum <- left_join(FST_max_sum, ROI_fst_max[,c(1,4,5)])
+write_tsv(x= FST_max_sum, file = glue("{output_dir}/ROI_snp_sum.tsv"))
+FST_max_sum <- read_tsv(glue("{output_dir}/ROI_snp_sum.tsv"))
+
+FST_max_sum$POP  <- factor(FST_max_sum$POP      , levels = pops_ord )
+FST_max_sum$CLUS <- factor(FST_max_sum$CLUS     , levels = cluster_ord )
+FST_max_sum <- left_join(FST_max_sum, trans_dist_df)
+
+FST_max_sum$cor_side      <- NA
+FST_max_sum$cor_side_pval <- NA
+FST_max_sum$cor_dir       <- NA
+
+
+#i <- FST_max_sum$LOC[1]
+for(i in unique(FST_max_sum$LOC)){
+  
+  LOC_w <- dplyr::filter(FST_max_sum,LOC == i & SIDE == "W") 
+  LOC_e <- dplyr::filter(FST_max_sum,LOC == i & SIDE == "E") 
+  
+  cor_w <- cor.test(LOC_w$DIST, LOC_w$REF_freq)
+  cor_e <- cor.test(LOC_e$DIST, LOC_e$REF_freq)
+  
+  FST_max_sum$cor_side[which(FST_max_sum$LOC == i & FST_max_sum$SIDE == "W")] <- cor_w$estimate
+  FST_max_sum$cor_side[which(FST_max_sum$LOC == i & FST_max_sum$SIDE == "E")] <- cor_e$estimate
+  
+  FST_max_sum$cor_side_pval[which(FST_max_sum$LOC == i & FST_max_sum$SIDE == "W")] <- cor_w$p.value
+  FST_max_sum$cor_side_pval[which(FST_max_sum$LOC == i & FST_max_sum$SIDE == "E")] <- cor_e$p.value
+}
+
+FST_max_sum$cor_dir[which(FST_max_sum$cor_side < 0)] <- "neg"
+FST_max_sum$cor_dir[which(FST_max_sum$cor_side > 0)] <- "pos"
+
+FST_max_sum$cor_side_abs <- abs(FST_max_sum$cor_side)
+
+test <- dplyr::filter(FST_max_sum, POP == "Karamea Bight") %>% dplyr::select(LOC, cor_side) %>% mutate(cor_dir =  ceiling(cor_side))
+colnames(test) <- c("LOC", "facet", "facet_dir")
+FST_max_sum <- left_join(FST_max_sum,test)
+
+FST_max_sum$SIDE <- factor(FST_max_sum$SIDE, levels = c("W", "E"))
+FST_max_sum$LOC  <- factor(FST_max_sum$LOC, levels =  unique(FST_max_sum$LOC))
+FST_max_sum <- FST_max_sum %>% mutate(SIDE_SNP = paste0(LOC,"_",SIDE))
+
+pval <- 1
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq, group = SIDE_SNP))+
+       geom_point(color = "black") + 
+       geom_smooth(aes(color = SIDE), method='lm',  se = FALSE )+
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ))+
+       theme_bw()+
+       facet_wrap(~facet_dir)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation.png"), dpi = 600, height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation.svg"), height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation.pdf"), height = 10, width = 10)
+
+
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq, group = LOC))+
+       geom_point(aes(color = CLUS)) + 
+       geom_smooth(color = "black", method='lm', formula = y ~ poly(x, 2)  ,se = FALSE )+
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ))+
+       theme_bw()+
+       facet_wrap(~facet_dir)
+
+
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq, group = SIDE_SNP))+
+       geom_point(aes(color = SIDE)) + 
+       geom_smooth(color = "black", method='lm',  se = TRUE )+
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       ylim(0,1)+
+       pop_cols +
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ), label.x = c(0,0), label.y = c(0.9,0.1))+
+       theme_bw()+
+       facet_wrap(~LOC)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.png"), dpi = 600, height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.svg"), height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.pdf"), height = 10, width = 10)
+
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq))+
+       geom_point(aes(color = SIDE)) + 
+       geom_smooth(color = "black", method='lm', formula = y ~ poly(x, 2)  ,se = TRUE )+
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ), label.x = c(0,0), label.y = c(0.9,0.1))+
+       theme_bw()+
+       facet_wrap(~LOC)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.png"), dpi = 600, height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.svg"), height = 10, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.pdf"), height = 10, width = 10)
+
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq))+
+       geom_smooth(color = "black", method='gam', formula = y ~ s(x)  ,se = TRUE )+
+       geom_point(aes(color = CLUS)) +     
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       geom_vline(xintercept = dist_boundaries, color = "darkred", linetype = "dashed")+     
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ), label.x = c(0,0), label.y = c(0.9,0.1))+
+       theme_bw()+
+       theme(legend.position="none")+
+       facet_wrap(~LOC)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.png"), height = 12, width = 12, dpi = 600)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.svg"), height = 12, width = 12)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.pdf"), height = 12, width = 12)
+
+
+FST_max_sum_SNP_SIDE <- FST_max_sum %>% group_by(SIDE_SNP) %>% summarise(SIDE     = unique(SIDE),
+                                                                         cor_abs  = unique(cor_side_abs),
+                                                                         cor_pval = unique(cor_side_pval))
+write_tsv(FST_max_sum_SNP_SIDE, file = glue("{output_dir}/correlation_by_transect.tsv"))
+
+ggplot(dplyr::filter(FST_max_sum_SNP_SIDE, cor_pval < pval), aes(x= SIDE, y= cor_abs, fill = SIDE))+
+  geom_boxplot()+
+  xlab("Transect Sub-section")+
+  ylab("Absolute Correlation")+
+  theme_bw()
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_boxplot.png"), dpi = 600, height = 5, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_boxplot.svg"), height = 5, width = 10)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_boxplot.pdf"), height = 5, width = 10)
+```
+
+
+```{r, fig.height=14, fig.width=14}
+######### Het
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST, y = REF_freq))+
+       geom_smooth(color = "black", method='gam', formula = y ~ s(x)  ,se = TRUE )+
+       geom_point(aes(color = CLUS)) +     
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Reference Allele")+
+       geom_vline(xintercept = dist_boundaries, color = "darkred", linetype = "dashed")+     
+       #geom_text(data = trans_dist_df, aes( x =DIST, y = 0 , label = CODE))+
+       #stat_regline_equation(aes(label = ..rr.label.. ), label.x = c(0,0), label.y = c(0.9,0.1))+
+       theme_bw()+
+       theme(legend.position="none")+
+       facet_wrap(~LOC)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.png"), height = 12, width = 12, dpi = 600)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.svg"), height = 12, width = 12)
+ggsave(filename = glue("{output_dir}/AF_transect_correlation_by_LOC.pdf"), height = 12, width = 12)
+
+ggplot(dplyr::filter(FST_max_sum, cor_side_pval < pval),aes(x = DIST))+ #, group = SIDE_SNP
+       geom_smooth(aes( y = HOM_ref), color = "black"    , method='gam', formula = y ~ s(x, bs = "cs")  ,se = TRUE, fill = "black"    , alpha = 0.2 )+
+       geom_smooth(aes( y = HOM_alt), color = "darkgrey" , method='gam', formula = y ~ s(x, bs = "cs")  ,se = TRUE, fill = "darkgrey" , alpha = 0.2 )+
+       geom_smooth(aes( y = HET)    , color = "darkgreen", method='gam', formula = y ~ s(x, bs = "cs")  ,se = TRUE, fill = "darkgreen", alpha = 0.2 )+
+       geom_point(aes( y = HOM_ref)    , color = "black")+
+       geom_point(aes( y = HOM_alt)    , color = "darkgrey")+
+       geom_point(aes( y = HET)        , color = "darkgreen")+
+       geom_vline(xintercept = dist_boundaries, color = "darkred", linetype = "dashed")+     
+       xlab("Distance along transect (km)")+
+       ylab("Frequency of Genotypes")+
+       theme_bw()+
+       facet_wrap(~LOC)
+ggsave(filename = glue("{output_dir}/Genotypes_transect_by_LOC.png"), height = 12, width = 12, dpi = 600)
+ggsave(filename = glue("{output_dir}/Genotypes_transect_by_LOC.svg"), height = 12, width = 12)
+ggsave(filename = glue("{output_dir}/Genotypes_transect_by_LOC.pdf"), height = 12, width = 12)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+#get allele frequencies for each SNP per cluster
+```{r}
+
+FST_max_sum_clust <- snpgdsSNPsum_byPOP(gds    = gds,
+                                        pop.id = sample_info$GENETIC_CLUSTER,
+                                        snp.id = ROI_snps)
+FST_max_sum_clust <- left_join(FST_max_sum_clust, pop_sum)
+FST_max_sum_clust <- left_join(FST_max_sum_clust, ROI_fst_max[,c(1,4,5)])
+
+FST_max_sum_clust$trend <- NA
+which(FST_max_sum_clust$REF_freq - FST_max_sum_clust$ALT_freq > 0)
+
+write_tsv(x= FST_max_sum_clust, file = glue("{output_dir}/ROI_snp_sum_clust.tsv"))
+FST_max_sum_clust <- read_tsv(glue("{output_dir}/ROI_snp_sum_clust.tsv"))
+
+freq_west <- FST_max_sum_clust %>% dplyr::filter(POP == "West") %>% dplyr::select(ROI, REF_freq, LOC) 
+colnames(freq_west) <- c("ROI","REF_freq_west", "LOC")
+freq_east <- FST_max_sum_clust %>% dplyr::filter(POP == "East") %>% dplyr::select(ROI, REF_freq, LOC) 
+colnames(freq_east) <- c("ROI","REF_freq_east", "LOC")
+freq      <- inner_join(freq_west, freq_east) %>% mutate(slope = REF_freq_west - REF_freq_east, slope_abs = abs(slope))
+freq$slope_dir <- NA
+freq$slope_dir[which(freq$slope < 0)] <- "neg"
+freq$slope_dir[which(freq$slope > 0)] <- "pos"
+
+
+FST_max_sum_clust <- left_join(FST_max_sum_clust, freq[,c(2,4,5)])
+
+```
+
+#plot allele frequency chnage over latitude for each ROI using the snp with FST_max
+```{r}
+
+#j <- ROI_snps[14]
+
+for(j in ROI_snps){
+  snp_j <- dplyr::filter(FST_max_sum, LOC == j )
+  
+  snp_j_e <- dplyr::filter(FST_max_sum, SIDE == "E" )
+  cor_e   <- cor.test(snp_j_e$DIST, snp_j_e$REF_freq)
+  cor_e$estimate
+  cor_e$p.value
+  
+  snp_j_w <- dplyr::filter(FST_max_sum, SIDE == "W" )
+  cor_w   <- cor.test(snp_j_w$DIST, snp_j_w$REF_freq)
+  cor_w$estimate
+  cor_w$p.value
+  
+  #cor  <- cor.test(snp_j$LATH, snp_j$REF_freq)
+  #r2   <- round(cor$estimate,4)
+  
+  ggplot(snp_j,aes(x = LATH, y = REF_freq))+
+    geom_point() + 
+    geom_text(aes(label = POP)) +
+    geom_smooth(method='lm', color = "black" )+
+    stat_regline_equation(aes(label = ..rr.label.. ))+
+    theme_bw()
+  ggplot(snp_j,aes(x = DIST, y = REF_freq, group = SIDE, color = SIDE))+
+    geom_point(aes(color = SIDE)) + 
+    #geom_text(aes(label = POP)) +
+    geom_smooth(method='lm', color = "black" )+
+    #geom_smooth(method = "nls", formula = y ~ a * x + b, se = F,
+    #            method.args = list(start = list(a = 0.1, b = 0.1)))+
+    stat_regline_equation(aes(label = ..rr.label.. ))+
+    theme_bw()
+  
+  
+  snp_j_clust <- dplyr::filter(FST_max_sum_clust, LOC == j )
+  ggplot(snp_j_clust,aes(x = POP, y = REF_freq, color = POP))+
+    geom_point() + 
+    geom_text(aes(label = POP)) +
+    #geom_smooth(method='lm', color = "black" )+
+    #stat_regline_equation(aes(label = ..rr.label.. ))+
+    theme_bw()
+  
+}
+
+
+ggplot(FST_max_sum_clust,aes(x=POP, y=REF_freq, group = LOC, color = slope_dir))+
+  geom_point()+
+  geom_line()+
+  #geom_smooth(method='lm', color = "black" )+
+  #stat_regline_equation(aes(label = ..rr.label.. ))+
+  theme_bw()
+  
+
+ggplot(freq, aes( y= slope_abs))+
+  geom_boxplot()+
+  theme_bw()
+
+
+ ggplot(snp_j,aes(x = DIST, y = REF_freq, group = SIDE, color = SIDE))+
+    geom_point(aes(color = SIDE)) + 
+    #geom_text(aes(label = POP)) +
+    geom_smooth(method='lm', color = "black" )+
+    #geom_smooth(method = "nls", formula = y ~ a * x + b, se = F,
+    #            method.args = list(start = list(a = 0.1, b = 0.1)))+
+    stat_regline_equation(aes(label = ..rr.label.. ))+
+    theme_bw()
+
+ FST_max_sum <- FST_max_sum %>% mutate(SIDE_SNP = paste0(LOC,"_",SIDE))
+ 
+ggplot(FST_max_sum,aes(x = DIST, y = REF_freq, group = SIDE_SNP, color = SIDE))+
+       geom_point(aes(color = SIDE)) + 
+       geom_smooth(method='lm', color = "black", se = FALSE )+
+       #stat_regline_equation(aes(label = ..rr.label.. ))+
+       theme_bw()
+ 
+ 
+```
+
+
+
+
+
+
+
+
+

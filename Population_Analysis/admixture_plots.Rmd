@@ -1,0 +1,209 @@
+---
+title: "admixture_new"
+author: "Tom Oosting"
+date: "2024-06-28"
+output: html_document
+---
+
+#load packages
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(stringr)
+library(glue)
+
+###plotting
+library(ggplot2)
+library(ggsignif)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+
+source("Rfunctions/Rfunctions_population_analyses.R")
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+project       <- "snapper"
+data_set      <- "snapper_norm"
+filter        <- "neutral"
+iterations    <- 10000
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/{project}.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+
+#output
+admixture_output <- glue("D:/Research/Projects/{project}/06_output/{data_set}/admixture/{data_set}_{filter}_{iterations}_iterations/output/{data_set}_{filter}")
+admixture_plots  <- glue("D:/Research/Projects/{project}/06_output/{data_set}/admixture/{data_set}_{filter}_{iterations}_iterations")
+```
+
+#load data
+```{r}
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+
+#get population metrics
+pops  <- sort(unique(sample_info$POP))
+Npops <- length(pops)
+```
+
+```{r}
+###create POP factors to control order of plotting
+###deault is alphabetical but you can change the order to, for instance, group certain geographically similar sample locations.
+###check current order:
+#snapper norm
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+legend_ord  <- paste0(pops_ord," (",codes_ord,")")
+cluster_ord <- c("East","West")
+
+#set factors
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord ) #norm23
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+#create new order for samples based on factor levels created above, for admixture
+sample_info$ORD <- order_INDS(IND = sample_info$IND, FACTOR = sample_info$POP)
+
+#files
+admix_output <- list.files(dirname(admixture_output),".Q$", full.names = TRUE)
+ord_vec <- order(sample_info$POP, sample_info$LATH_seascape)
+samples_ord <- sample_info[ord_vec,]
+samples_ord$POP_CODE <- as.character(samples_ord$POP_CODE)
+
+```
+
+#set colors and shapes 
+```{r}
+#here you can set colors for all analyses and they will be constant throughout all figures for consistency 
+hex_codes <- hue_pal()(Npops)
+shapes     <- c(rep(c(15,16,17,18),10))[1:Npops]
+show_col(hex_codes)      
+pop_cols <- sample_info   %>% 
+            group_by(POP) %>% 
+            summarise(N = n()) %>% 
+            mutate(color = hex_codes,
+                   shape = shapes)
+colors <- pop_cols$color
+shapes <- pop_cols$shape
+
+col_East <- pal_nejm("default")(5)[c(1)]
+col_West <- pal_nejm("default")(5)[c(2)]
+
+cluster_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(1:4)]) 
+comparison_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+```
+
+# Crossvalidation
+```{r}
+CVfile <- paste0(dirname(admixture_output),"/cross_validation.txt")
+
+cross_K     <- as.numeric(str_replace_all(read_lines(CVfile),"^CV.*=(\\d*)\\): (\\d\\.\\d*)","\\1" ))
+cross_error <- as.numeric(str_replace_all(read_lines(CVfile),"^CV.*=(\\d*)\\): (\\d\\.\\d*)","\\2" ))
+cross_df <- data.frame(K = cross_K,error = cross_error) %>% arrange(K)
+Kmin <-  which(cross_error == min(cross_error))  
+
+png(paste0(admixture_plots,"/cross_validation.png"), width = 12, height = 6, units = "in", res = 300)
+  plot(x    = cross_df$K ,
+       y    = cross_df$error,
+       col  = "black",
+       pch  = 16,
+       type = "b",
+       xlab = "K (Populations)",
+       ylab = "Cross Validation (CV) Error",
+       xaxt = "n",
+       main = "Admixture Cross Valiadation")
+  points(x=cross_K[Kmin],cross_error[Kmin],col = "red", pch = 16)
+  axis(1, at = cross_K, labels = cross_K)
+dev.off()
+```
+
+#plot admixture results
+```{r}
+#i <- admix_output[2]
+for(i in admix_output){
+  #load Q file
+  admix = as.matrix(read.table(i)[ord_vec,])
+  
+  #get colors
+  colors_i <- colors[1:ncol(admix)]
+  if(ncol(admix) == 2){colors_i <- c(col_East,col_West)}
+  
+  #determine order samples
+  pops <- samples_ord$POP_CODE
+  pops_o <- order(pops)
+  
+  #ordered by pop 
+  ord <- orderInds(pop = as.vector(pops))  
+
+  #get x-axis text
+  text_loc <- sort(as.numeric(as.character(tapply(1:nrow(admix),pops[ord],mean))))
+  
+  #make admixture plot
+  png(glue::glue("{admixture_plots}/{basename(i)}.png"), width = 12, height = 3.3, units = "in", res = 300)
+    par(mar=c(6,4,2,1))
+    barplot(t(admix)[,ord],col=colors_i,names=NULL,xaxt="n", las=2,ylab="Admixture proportions",cex.names=0.75, space = 0, border = NA) #, main = basename(i))
+    text(text_loc,-0.05,unique(pops[ord]),xpd=T, adj = 0.5, srt = 0)
+    abline(v=cumsum(sapply(unique(pops[ord]),function(x){sum(pops[ord]==x)})),col=1,lwd=1,xpd = F)
+  dev.off()
+  
+  pdf(glue::glue("{admixture_plots}/{basename(i)}.pdf"), width = 12, height = 3.3)
+    par(mar=c(6,4,2,1))
+    barplot(t(admix)[,ord],col=colors_i,names=NULL,xaxt="n", las=2,ylab="Admixture proportions",cex.names=0.75, space = 0, border = NA) #, main = basename(i))
+    text(text_loc,-0.05,unique(pops[ord]),xpd=T, adj = 0.5, srt = 0)
+    abline(v=cumsum(sapply(unique(pops[ord]),function(x){sum(pops[ord]==x)})),col=1,lwd=3,xpd = F)
+  dev.off()
+  
+  svg(glue::glue("{admixture_plots}/{basename(i)}.svg"), width = 12, height = 3.3)
+    par(mar=c(6,4,2,1))
+    barplot(t(admix)[,ord],col=colors_i,names=NULL,xaxt="n", las=2,ylab="Admixture proportions",cex.names=0.75, space = 0, border = NA) #, main = basename(i))
+    text(text_loc,-0.05,unique(pops[ord]),xpd=T, adj = 0.5, srt = 0)
+    abline(v=cumsum(sapply(unique(pops[ord]),function(x){sum(pops[ord]==x)})),col=1,lwd=3,xpd = F)
+  dev.off()
+  }
+```
+
+
+
+```{r, fig.height=6, fig.width=20}
+Q2 <- as.data.frame(read.table(admix_output[2]))
+
+Q2 <- cbind(dplyr::select(sample_info, IND), Q2)
+colnames(Q2) <- c("IND","NE","SW")
+
+Q2_long       <- pivot_longer(Q2, cols = colnames(Q2[,2:ncol(Q2)]), names_to = "Cluster", values_to = "Prob")
+Q2_long$Cluster <- factor(Q2_long$Cluster, levels = c("SW","NE"))
+colors <- c("#0072b5ff","#bc3c29ff")
+Q2_long       <- left_join(Q2_long,sample_info[,c(2,3,9)])
+
+Q2_long_grouped <- Q2_long %>% dplyr::arrange(POP, IND)
+IND_Ord <-  unique(Q2_long_grouped$IND )
+Q2_long_grouped$IND <- factor(Q2_long_grouped$IND, levels = IND_Ord)
+
+sample_sum <- sample_info %>% group_by(POP_CODE) %>% summarise(N = n()) %>% mutate(bar = cumsum(N)+.5, text_x = cumsum(N)-(N/2))
+
+ggplot(data = Q2_long_grouped,aes(y=Prob, x= IND))+
+  geom_col(aes(fill = Cluster, color = Cluster),position = position_stack(reverse = TRUE))+
+  geom_segment(data = sample_sum, aes(x = bar, y = -0.05, yend = 1), size = 1.5)+
+  coord_cartesian(ylim = c(-0.05,1), expand = FALSE)+
+  geom_text(data = sample_sum, aes(x = text_x , y = -0.02, label = POP_CODE), size = 6)+
+  scale_fill_manual(values = colors)+
+  scale_color_manual(values = colors)+
+  ylab("Admixture Proportions")+
+  theme_bw()+
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+ggsave(filename = glue("{admixture_plots}/{data_set}_q2_ggplot.png"), width = 20, height = 5, dpi = 600)
+ggsave(filename = glue("{admixture_plots}/{data_set}_q2_ggplot.svg"), width = 20, height = 5 )
+ggsave(filename = glue("{admixture_plots}/{data_set}_q2_ggplot.pdf"), width = 20, height = 5 )
+
+
+write_tsv(Q2_df, file = glue("{admixture_plots}/{data_set}_q2_df.tsv"))
+
+```
+

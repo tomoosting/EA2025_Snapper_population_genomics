@@ -1,0 +1,92 @@
+---
+title: "Population Analyses SNP data"
+author: "Tom Oosting"
+date: '2023-08-10'
+output: html_document
+---
+#load packages
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(stringr)
+library(glue)
+library(boot)
+
+###plotting
+library(ggplot2)
+library(ggsignif)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(ggpubr)
+
+###SNPdata
+library(SNPRelate)
+library(gdsfmt)
+library(dartR)
+library(reshape2)
+library(gdistance)
+
+###spatial
+library(sf)
+library(raster)
+
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+project       <- "snapper"
+data_set      <- "snapper_norm"
+filter        <- "neutral"
+grouping      <- "SITE"
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}")
+```
+
+#load data
+```{r}
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+
+#read genlight file
+if(file.exists(paste0(snpfile_ext,".genlight.R"))){
+  load(paste0(snpfile_ext,".genlight.R"))
+  strata(genlight) <- sample_info
+} else {
+  vcfR     <- vcfR::read.vcfR(paste0(snpfile_ext,".vcf.gz"))
+  genlight <- vcfR::vcfR2genlight(vcfR)
+  strata(genlight) <- sample_info
+  save(genlight, file = paste0(snpfile_ext,".genlight.R"))
+}
+```
+
+#perform AMOVA 
+```{r}
+#perform AMOVA
+AMOVA <- poppr::poppr.amova(genlight, ~GENETIC_CLUSTER/POP)
+capture.output(AMOVA, file = glue::glue("{div_out}.AMOVA.txt") )
+#significance test
+AMOVA_significance <- ade4::randtest(AMOVA, nrepet = 999)
+
+AMOVA_significance$names
+AMOVA_significance$pvalue
+
+capture.output(AMOVA_significance, file = glue::glue("{div_out}.AMOVA_significance.txt"))
+save(AMOVA,AMOVA_significance,file = glue::glue("{div_out}.AMOVA.R"))
+##################################################
+#copy into console below to print full results   #
+AMOVA_significance                               #
+#don't know why in prints different from script  #
+##################################################
+#print significance results
+png(filename = glue::glue("{div_out}.AMOVA_significance_plot.png"), res = 300, height = 4, width = 8 , units = "in"  )
+  plot(AMOVA_significance)
+dev.off()
+```
+

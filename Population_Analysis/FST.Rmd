@@ -1,0 +1,451 @@
+---
+title: "Population Analyses SNP data"
+author: "Tom Oosting"
+date: '2023-08-10'
+output: html_document
+---
+#load packages
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(stringr)
+library(glue)
+library(boot)
+
+###plotting
+library(ggplot2)
+library(ggsignif)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(ggpubr)
+
+###SNPdata
+library(SNPRelate)
+library(gdsfmt)
+library(dartR)
+library(reshape2)
+library(gdistance)
+
+###spatial
+library(sf)
+library(raster)
+
+source("D:/Research/Scripts/R/functions/Rfunctions_population_analyses.R")
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+project       <- "snapper"
+data_set      <- "snapper_norm"
+filter        <- "neutral"
+grouping      <- "SITE"
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}")
+```
+
+#load data
+```{r}
+#read gds snprelate
+gds <- snpgdsReadGDS(gds_file = paste0(SNP_ext,".gds")) #gdsfmt::closefn.gds(gds) if you need to close the gds file
+
+#extract locus information
+bim <- snpgdsSNPsum(gds = gds, extended = TRUE)
+
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+samples     <- read.gdsn(index.gdsn(gds, "sample.id"))
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND) %>% mutate(LEGEND = as.character(glue("{POP} ({POP_CODE})")))
+sample_info <- sample_info[match(samples, sample_info$IND),]
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+#strata(genlight) <- sample_info # needs adegenet
+
+#get population metrics
+pops  <- sort(unique(sample_info$POP))
+Npops <- length(pops)
+pop_combs <- as.data.frame(t(utils::combn(pops,2)))
+pop_combs <- pop_combs %>% mutate(merge = paste(V1,V2,sep = "."))
+colnames(pop_combs) <- c("pop1","pop2","combID")
+combs <- pop_combs$merge
+N_comb <- nrow(pop_combs)
+
+###create POP factors to control order of plotting
+###deault is alphabetical but you can change the order to, for instance, group certain geographically similar sample locations.
+###check current order:
+#snapper_norm
+factor_ord  <- c(8,12,9,7,13,11,2,10,5,1,3,4,6)
+pops_ord    <- c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Hawke's Bay")
+codes_ord   <- c("KB","TB","MB","KC","WC","NW","CR","NE","HG","BP","EC","GB","HB")
+legend_ord  <- paste0(pops_ord," (",codes_ord,")")
+cluster_ord <- c("East","West")
+
+
+#set factors
+sample_info$POP             <- factor(sample_info$POP            , levels = pops_ord )
+sample_info$POP_CODE        <- factor(sample_info$POP_CODE       , levels = codes_ord)
+sample_info$LEGEND          <- factor(sample_info$LEGEND         , levels = legend_ord)
+sample_info$GENETIC_CLUSTER <- factor(sample_info$GENETIC_CLUSTER, levels = cluster_ord)
+#create new order for samples based on factor levels created above, for admixture
+sample_info$ORD <- order_INDS(IND = sample_info$IND, FACTOR = sample_info$POP)
+```
+#set colors and shapes 
+```{r}
+#here you can set colors for all analyses and they will be constant throughout all figures for consistency 
+hex_codes <- hue_pal()(Npops)
+shapes     <- c(rep(c(15,16,17,18),10))[1:Npops]
+show_col(hex_codes)      
+pop_cols <- sample_info   %>% 
+            group_by(POP) %>% 
+            summarise(N = n()) %>% 
+            mutate(color = hex_codes,
+                   shape = shapes)
+colors <- pop_cols$color
+shapes <- pop_cols$shape
+
+col_East <- pal_nejm("default")(5)[c(1)]
+col_West <- pal_nejm("default")(5)[c(2)]
+col_Comp <- pal_npg("nrc")(5)[c(3)]
+
+cluster_cols  <- scale_color_manual(values = pal_nejm("default")(5)[c(1:4)]) 
+comparison_cols <- scale_color_manual(values = pal_npg("nrc")(5)[c(3)]) 
+```
+
+#Global FST
+```{r}
+#estimate pairwise FST
+dir.create(glue::glue("{output_dir}/PW_FST/QQplots"), recursive = TRUE)
+FST_out  <- glue::glue("{output_dir}/PW_FST/{data_set}")
+# Multiple populations: CEU HCB JPT YRI
+global_FST <- SNPRelate::snpgdsFst(gdsobj        = gds,
+                                   population    = as.factor(sample_info$POP),
+                                   method        = "W&C84",
+                                   autosome.only = FALSE)
+
+# Weir and Cockerham weighted Fst estimate, USE THIS ONE!!!
+global_FST$Fst        
+# Weir and Cockerham mean Fst estimate
+global_FST$MeanFst    
+
+# internal function to obtain the mean
+Bmean <- function(data,indices){
+  d <- data[indices] # allows boot to select sample 
+  return(mean(d))}
+results <- boot(data= global_FST$FstSNP, statistic=Bmean, R=100)
+
+#QQplots
+plot(results)   
+
+#obtain pval
+Ttest <- t.test(results$t)
+pval  <- Ttest$p.value
+
+#obtain confidence intervals
+CIs <- boot::boot.ci(results, type=c("norm", "basic", "perc"), conf = 0.95)
+CIs$normal
+```
+#Pairwise FST estimates between all sample locations
+```{r}
+#estimate pairwise FST
+dir.create(glue::glue("{output_dir}/PW_FST/QQplots"), recursive = TRUE)
+FST_out  <- glue::glue("{output_dir}/PW_FST/{data_set}_{filter}")
+
+#you can specify out parameter to save table and create QQplots to check assumptions
+PWFST_df <- snpgdsPWFST(gds = gds,
+                        pop.id = as.character(sample_info$POP_CODE),
+                        reps = 100,
+                        signf = 0.05,
+                        missing.rate = 0.95,
+                        #snp.id = SNPs_neutral,
+                        out = glue("{FST_out}"))
+
+#you can specify out parameter to save table and create QQplots to check assumptions
+PWFST_df <- snpgdsPWFST(gds = gds,
+                        pop.id = as.character(sample_info$POP),
+                        reps = 100,
+                        signf = 0.05,
+                        missing.rate = 0.95,
+                        #snp.id = SNPs_neutral,
+                        out = glue("{FST_out}_POP"))
+
+#convert FST estimates to matrix
+sort(unique(PWFST_df$pop1)) #you 
+sort(as.character(unique(sample_info$POP_CODE)))
+
+#PWFST_mat <- snpgdsFSTdf2mat(pwFST_df = PWFST_df, order = c(10,5,1,3,2,4,6,12,7,8,9,11)) 
+#mat_ord <- c(7,12,9,8,13,11,2,10,6,1,3,4,5)
+mat_ord <- c(7,12,9,8,13,11,5,4,2,10,6,1,3)
+
+#unique(sample_info$POP_CODE)[c(8,7,9,10,11,13,6,5,12,2,1,3,4)]
+
+PWFST_mat <- snpgdsFSTdf2mat(pwFST_df = PWFST_df, order = mat_ord) 
+write_tsv(as.data.frame(PWFST_mat),file =  glue("{FST_out}_pwFST_mat.tsv"))
+
+CODE_cols <- unique(sort(sample_info$POP_CODE))
+#CODE_cols <- unique(sample_info$POP_CODE)[c(2,1,3,4,12,5,6,11,10,8,9,7)]
+PWFST_mat_code <- PWFST_mat
+colnames(PWFST_mat_code) <- CODE_cols
+rownames(PWFST_mat_code) <- CODE_cols  
+  
+#create heat maps
+#set legend breaks manually
+legend_breaks <- c(1e-3, 2e-3, 3e-3, 4e-3)
+#create heatmap png
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=T, cluster_cols=T
+                   ,cutree_cols = 1
+                   ,display_numbers = T
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_clust_numbers_heatmap.png")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=F, cluster_cols=F
+                   ,cutree_cols = 1
+                   ,display_numbers = T
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_no_clust_numbers_heatmap.png")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=T, cluster_cols=T
+                   ,cutree_cols = 1
+                   ,display_numbers = F
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_clust_no_numbers_heatmap.png")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=F, cluster_cols=F
+                   ,cutree_cols = 1
+                   ,display_numbers = F
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_no_clust_no_numbers_heatmap.png")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+#create heatmap pdf
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=T, cluster_cols=T
+                   ,cutree_cols = 1
+                   ,display_numbers = T
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_clust_numbers_heatmap.pdf")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=F, cluster_cols=F
+                   ,cutree_cols = 1
+                   ,display_numbers = T
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_no_clust_numbers_heatmap.pdf")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=T, cluster_cols=T
+                   ,cutree_cols = 1
+                   ,display_numbers = F
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_clust_no_numbers_heatmap.pdf")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+pheatmap::pheatmap(PWFST_mat,cutree_rows = 1
+                   ,cluster_rows=F, cluster_cols=F
+                   ,cutree_cols = 1
+                   ,display_numbers = F
+                   ,number_format = "%.4f"
+                   ,filename = glue::glue("{FST_out}_no_clust_no_numbers_heatmap.pdf")
+                   ,width = 7
+                   ,height = 7
+                   #you can add a legend title, but you'd have to set the legend break yourself..
+                   ,legend_breaks = c(legend_breaks, max(PWFST_mat))
+                   ,legend_labels = c(legend_breaks, "FST\n")
+)
+```
+
+# Isolation by distance analyses
+!!!GPS required, atleast one per sample location!!!
+```{r,fig.width=12, fig.height=16}
+dir.create(glue::glue("{output_dir}/IBD"))
+IBD_out  <- glue::glue("{output_dir}/IBD/{data_set}")
+#map data
+shapefile <- shapefile("D:/Research/Scripts/R/shapefiles/NewZealand_Boundary.shp") 
+         nz <- st_read("D:/Research/Scripts/R/shapefiles/NewZealand_Boundary.shp")
+
+###create distance matrix
+GPS_region <- sample_info %>% group_by(POP) %>% summarise(long = mean(LONG_seascape, na.rm = T),lath = mean(LATH_seascape, na.rm = T))
+GPS_region[3,3] <- -40.86 #manually change loc for marlborough sounds
+
+##### distance to disjuntions
+#GPS_region$POP <- factor(GPS_region$POP, levels =  c("Karamea Bight","Tasman Bay","Marlborough Sounds","Kapiti Coast","West Coast","Northland West","Tauroa","Cape Reinga","Northland East","Hauraki Gulf","Bay of Plenty","East Cape","Gisborne","Mahia","Hawke's Bay"))
+#GPS_region <- rbind(GPS_region,c("Tauroa",172.959159,-35.188908))
+#GPS_region <- rbind(GPS_region,c("Mahia",178.047929,-39.109805))
+#
+#GPS_region$long <- as.double(GPS_region$long)
+#GPS_region$lath <- as.double(GPS_region$lath)
+#
+#GPS_region <- dplyr::arrange(GPS_region,POP)
+#
+#####
+
+st.GPS_region <- GPS_region %>% st_as_sf(coords = c("long","lath"),crs=4326, remove=FALSE)
+write_tsv(GPS_region, file = glue("{IBD_out}_POP_GPS.tsv"))
+
+####prepare shapefile and raster####
+plot(shapefile)
+ext <- extent(-180, 180, -47.36973, -32.39339) 
+#important to have extant -180 180 take chatham into account
+gridsize <- 0.1
+r <- raster(ext, res=gridsize)
+rr <- rasterize(shapefile, r)
+plot(rr)
+
+####restricted to ocean####
+#Create a raster of ocean
+rr->roce
+roce[is.na(roce[])] <- 2
+roce[roce[]==1] <- NA
+roce[roce[]==2] <- 1
+plot(roce)
+plot(roce,ext=c(160, 180, -47.36973, -32.39339))
+
+#do the distance analysis
+troce <- transition(roce, mean, directions = 8) #less than 1 min
+troceC <- geoCorrection(troce, "c", scl = F)
+pC_region <- as.matrix(GPS_region[c("long","lath")])
+cosDist_reg <- costDistance(troceC, pC_region)
+#convert to Km and round to the nearest Km
+cosDist_reg <- cosDist_reg/1000
+cosDist_reg <- round(cosDist_reg,0)
+
+cosDist_reg
+cosDist_reg_mat <- as.data.frame(as.matrix(cosDist_reg))
+colnames(cosDist_reg_mat) <- GPS_region$POP
+rownames(cosDist_reg_mat) <- GPS_region$POP
+write_tsv(cosDist_reg_mat, file = glue("{IBD_out}_distance_matrix.tsv"))
+
+cosDist_reg_df <- melt(as.matrix(cosDist_reg_mat),varnames = c("pop1","pop2"))
+colnames(cosDist_reg_df) <- c("pop1","pop2","distance")
+
+#add gentic cluster comparison
+#very specific to snapper data set
+cluster_info <- sample_info %>% dplyr::select(POP, GENETIC_CLUSTER) %>% unique()
+cosDist_reg_df <- left_join(cosDist_reg_df,cluster_info, by = c("pop1"="POP"))
+colnames(cosDist_reg_df) <- c("pop1","pop2","distance","cluster1")
+cosDist_reg_df <- left_join(cosDist_reg_df,cluster_info, by = c("pop2"="POP"))
+colnames(cosDist_reg_df) <- c("pop1","pop2","distance","cluster1","cluster2")
+cosDist_reg_df <- cosDist_reg_df %>% mutate(comparison = paste0(cluster1,"-",cluster2))
+
+#!!! need to have PW FST calculation!!!
+#join PW FST estimates with obtained distance values
+PW_FST_df <- read_tsv(glue("{FST_out}_POP_pwFST.tsv"))
+PW_FST_df <- left_join(PW_FST_df,cosDist_reg_df, by = c("pop1","pop2"))
+PW_FST_df <- PW_FST_df %>% mutate(FST_adj = FST_weighted/(1-FST_weighted),
+                              log_km  = log(distance))
+PW_FST_df$comparison[which(stringr::str_detect(PW_FST_df$comparison, "West-East"))] <- "East-West"
+
+
+
+
+FST_est_NN <- PW_FST_df %>% filter(comparison == "East-East")
+FST_est_SS <- PW_FST_df %>% filter(comparison == "West-West")
+FST_est_NS <- PW_FST_df %>% filter(comparison == "East-West")
+
+### create IBD plot
+ggplot(PW_FST_df, aes(x=distance, y=FST_weighted))+
+  geom_smooth(method='lm', color = "black" )+
+  stat_regline_equation(aes(label = ..rr.label.. ))+
+  geom_point(aes(col = comparison))+
+  #geom_label(label = id)+
+  ylab(expression(Mean~F[ST]))+
+  xlab("Distance (km)")+
+  theme_bw()
+ggsave(glue("{IBD_out}_IBD_plot.png"),width = 8, height = 4, dpi = 300, units = "in")
+ggsave(glue("{IBD_out}_IBD_plot.pdf"),width = 8, height = 4, dpi = 300, units = "in")
+
+cor <- cor.test(PW_FST_df$log_km,PW_FST_df$FST_adj)
+pval <- signif(cor$p.value,3)
+r2   <- round(cor$estimate,4)
+
+ggplot(PW_FST_df, aes(x=log_km, y=FST_adj))+
+  geom_smooth(method='lm', color = "black" )+
+  #stat_regline_equation(aes(label = ..rr.label.. ))+
+  annotate("text",label=bquote(r^2==~.(r2)~","~italic(p)==.(pval)),x = 7,y = -0.001,vjust = 1,hjust = 1,size=4)+
+  geom_point(aes(col = comparison))+
+  scale_color_manual(values = c(col_East,col_West,col_Comp)) +
+  #geom_label(label = id)+
+  theme_bw() +
+  ylab(expression(F[ST]/(1-F[ST])))+
+  xlab("log10 Distance (km)")+
+  labs(col = "Comparison") + 
+  theme(legend.position = c(0.08,0.8),
+        legend.background = element_blank(),
+        legend.key = element_rect(color = NA, fill = NA)) 
+ggsave(glue("{IBD_out}_IBD_adjusted_plot.png"),width = 8, height = 4, dpi = 300, units = "in")
+ggsave(glue("{IBD_out}_IBD_adjusted_plot.pdf"),width = 8, height = 4, dpi = 300, units = "in")
+
+```
+
+#mantel test
+```{r}
+#make FST matrix
+FST_mat <- read_tsv(glue("{FST_out}_pwFST_mat.tsv"))
+rownames(FST_mat) <- colnames(FST_mat)
+FST_mat <- as.matrix(FST_mat)
+dist_FST <- as.dist(FST_mat,diag = T, upper = T )
+
+#make distance matrix
+distance_mat <- as.data.frame(read_tsv(glue("{IBD_out}_distance_matrix.tsv")))
+rownames(distance_mat) <- colnames(distance_mat)
+distance_mat <- as.matrix(distance_mat)
+dist_km <- as.dist(distance_mat,diag = T, upper = T)
+
+# perform mantel test
+mtest <- mantel.randtest(dist_FST,dist_km)
+#plot(mtest)
+mtest
+capture.output(mtest,file = glue("{IBD_out}_mantel_test.txt"))
+#############################################################################
+#adjusted matrixes
+distance_mat_log <- log(distance_mat)
+distance_mat_log[!is.finite(distance_mat_log)] <- 0
+dist_km_log      <- dist(distance_mat_log,diag = T, upper = T)
+FST_mat_adj      <- FST_mat/(1-FST_mat)
+dist_FST_adj     <- dist(FST_mat_adj,diag = T, upper = T )
+
+mtest_adj <- mantel.randtest(dist_FST_adj,dist_km_log)
+mtest_adj
+capture.output(mtest_adj,file = glue("{IBD_out}_mantel_test_adjusted.txt"))
+```

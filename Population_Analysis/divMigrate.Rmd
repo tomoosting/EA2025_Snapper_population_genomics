@@ -1,0 +1,150 @@
+---
+title: "migration_divMigrate"
+author: "Tom Oosting"
+date: "2024-06-17"
+output: html_document
+---
+
+#load packages
+```{r include=FALSE}
+library(tidyverse)
+library(glue)
+library(dartR)
+library(diveRsity)
+```
+
+#PATHS to input - if everything is correct you can run the whole script after this section
+```{r}
+#input
+data_set      <- "snapper_norm"
+filter        <- "independant_outliers_cleaned" #cleaned vcf only has the GT field in limited INFO fields, otherwise an error occurs
+sample_file   <- glue("D:/Research/Projects/snapper/01_sample_information/snapper.sample_info.tsv")
+SNP_ext       <- glue("D:/Research/Projects/snapper/05_data/{data_set}/{data_set}_{filter}")
+
+#output
+output_dir     <- glue("D:/Research/Projects/snapper/06_output/{data_set}/divMigrate")
+dir.create(output_dir)
+```
+
+#load genlight data
+```{r}
+#load genlight
+vcf_file      <- glue("{SNP_ext}.vcf.gz")
+genlight_file <- glue("{SNP_ext}.dartR.genlight.R")
+if(!file.exists(genlight_file)){
+  genlight <- dartR::gl.read.vcf(vcffile = vcf_file)
+  save(genlight, file = genlight_file)
+} else {
+  print("genlight file already present, loading now")
+  load(paste0(SNP_ext,".dartR.genlight.R"))
+}
+samples <- genlight@ind.names
+
+#create genepop if not present
+genepop_file <- glue("{SNP_ext}.genepop.gen")
+if(!file.exists(genepop_file)){
+  dartR::gl2genepop(genlight, outfile = basename(genepop_file), outpath = dirname(genepop_file), verbose = 5) 
+} else {
+  print("genepop file already present, will not generate a new one")
+}
+```
+
+load sample data
+```{r}
+#Sample information and population information
+sample_info <- read_tsv(sample_file)
+sample_info <- sample_info %>% filter(IND %in% samples) %>% dplyr::arrange(IND)
+sample_info <- sample_info[match(samples, sample_info$IND),]
+
+#this needs to be TRUE!
+identical(samples, sample_info$IND)
+```
+#create genlight for with specific population strata
+```{r}
+#population stata identifier
+strata <- "GENETIC_CLUSTER"
+
+#get unique strata names
+clusters <- unique(sample_info[[strata]])
+
+#create genlight strata object or load if present
+gl_strata_file <- glue("{SNP_ext}_{strata}.dartR.genlight.R")
+if(!file.exists(gl_strata_file)){
+#set pops genlight
+  genlight_strata <- genlight
+  for(i in clusters){
+    sample_info_i   <- sample_info %>% dplyr::filter(.data[[strata]] == i)
+    genlight_strata <- dartR::gl.define.pop(genlight_strata, ind.list = sample_info_i$IND, new = i)
+    }
+  save(genlight_strata, file = gl_strata_file)
+} else {
+  print("genlight file already present, loading now")
+  load(gl_strata_file)
+}
+
+#create genepop file if not present
+genepop_strata_file <- glue("{SNP_ext}_{strata}_all_snps.genepop.gen")
+if(!file.exists(genepop_strata_file)){
+  dartR::gl2genepop(genlight_strata, outfile = basename(genepop_strata_file), outpath = dirname(genepop_strata_file), verbose = 5) 
+} else {
+  print("genepop file already present, will not generate a new one")
+}
+```
+
+#subsample genlight if wanted
+```{r}
+Nloci <- 2000
+
+gl_subsample_file <- glue({"{SNP_ext}_{strata}_{Nloci}_snps.dartR.genlight.R"})
+
+#create subsampled genlight of load if present
+if(!file.exists(gl_subsample_file)){
+  genlight_strata_sub <- gl.subsample.loci(x      = genlight_strata,
+                                           n      = Nloci,
+                                           method = "random")
+  save(genlight_strata_sub, file = gl_subsample_file)
+} else {
+  print("genlight file already present, loading now")
+  load(gl_subsample_file)
+}
+
+#create genepop file if not present
+gp_subsample_file <- glue({"{SNP_ext}_{strata}_{Nloci}_snps.genepop.gen"})
+if(!file.exists(genepop_subsample_file)){
+  dartR::gl2genepop(x       = genlight_strata_sub,
+                    outfile = basename(gp_subsample_file),
+                    outpath = dirname(gp_subsample_file),
+                    verbose = 5) 
+} else {
+  print("genepop file already present, will not generate new one")
+}
+```
+
+#run divmigrate
+run as a block to save file in output directory, otherwise output is saved where this script is located
+```{r}
+#parameters
+strata <- "GENETIC_CLUSTER"
+Nloci  <- "all"
+stat   <- "gst"
+thresh <- 0.0
+reps   <- "10000"
+
+#do to output dir
+setwd(output_dir)
+
+#run divMig
+divMigrate_genepop <- glue({"{SNP_ext}_{strata}_{Nloci}_snps.genepop.gen"})
+divMigrate_out     <- glue({"{data_set}_{filter}_{strata}_{Nloci}snps_{stat}stats_{thresh}threshold_{reps}reps"})
+divMig  <- divMigrate(infile  = divMigrate_genepop, 
+                      outfile = paste0(divMigrate_out),
+                      boots   = reps,
+                      stat    = stat,
+                      plot_network = TRUE,
+                      filter_threshold = thresh,
+                      para = TRUE)
+divMig
+capture.output(divMig, file = paste0(output_dir,"/",divMigrate_out,"-[divMigrate]/divMig_console_output.txt"))
+```
+
+
