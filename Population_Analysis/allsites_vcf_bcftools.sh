@@ -54,14 +54,3 @@ mkdir -p $TMP
 #create index
 echo "creating index"
 tabix -f $TMP/$REG'_'$SET'_raw.allsites.vcf.gz'
-
-# run pixy
-echo "running pixy"
-source activate /nfs/scratch/oostinto/conda/pixy
-pixy	--stats pi dxy fst								\
-		--vcf $TMP/$REG'_'$SET'_raw.allsites.vcf.gz'	\
-		--populations $POP								\
-		--window_size 5000								\
-		--n_cores 8										\
-		--output_folder $OUT							\
-		--output_prefix $REG'_'$SET	
