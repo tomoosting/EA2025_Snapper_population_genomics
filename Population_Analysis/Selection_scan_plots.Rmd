@@ -1,0 +1,275 @@
+---
+title: "Selection_scan_plotting"
+author: "Tom Oosting"
+date: "2026-04-28"
+output: html_document
+---
+
+```{r include=FALSE}
+###general 
+library(tidyverse)
+library(data.table)
+library(glue)
+library(ggsignif)
+library(ggrepel)
+library(RColorBrewer)
+library(ggsci)
+library(scales)
+library(patchwork)
+library(svglite)
+source("SNPRelate_functions.R")
+```
+
+```{r}
+#input
+project       <- "snapper"
+data          <- "norm"
+filter        <- "qc"
+data_set      <- glue("{project}_{data}")
+SNP_ext       <- glue("~/Projects/{project}/datasets/{data_set}/genotype_data/{data_set}_{filter}/snapper_norm_qc")
+sample_data   <- glue("~/Projects/{project}/datasets/{data_set}/sample_data/{data_set}_sample_info.tsv")
+
+#sliding window
+slw <- 10000 #size sliding window
+slw_abr <- "10kb"
+
+#output
+output_dir     <- glue("~/Projects/{project}/datasets/{data_set}/population_analyses")
+```
+
+```{r}
+#read gds snprelate
+#gds <- snpgdsReadGDS(gds_file = paste0(SNP_ext,".gds")) #gdsfmt::closefn.gds(gds) if you need to close the gds file
+bim <- read_tsv(file = paste0(SNP_ext,".gds.bim"))
+sample_info <- read_tsv(sample_data)
+#this needs to be TRUE!
+#identical( read.gdsn(index.gdsn(gds, "sample.id")), sample_info$IND)
+
+#get population metrics
+pops <- unique(sample_info$CLUSTER)
+Npops <- length(pops)
+pop_combs <- as.data.frame(t(utils::combn(pops,2)))
+pop_combs <- pop_combs %>% mutate(merge = paste(V1,V2,sep = "."))
+colnames(pop_combs) <- c("pop1","pop2","combID")
+combs <- pop_combs$combID
+N_comb <- nrow(pop_combs)
+
+#information reference genome
+chr_info <- read_tsv(file = paste0(SNP_ext,".gds.chr_info"))
+colnames(chr_info) <- c("LG","Length","tot","CHR")
+```
+
+```{r include=FALSE}
+windows_df <- read_tsv(glue("{output_dir}/selection_scan/windows_df_{slw_abr}.tsv"))
+#plotting aesthetics
+pop_colors <- pal_nejm("default")(5)[c(1:2)]
+comp_color <- pal_npg("nrc")(5)[c(3)]
+
+#axis showing linkage groups
+axisdf = windows_df %>% group_by(CHR) %>% summarize(center =(max(BPcum) + min(BPcum) ) / 2 
+                                                 ,start  = min(BPcum)
+                                                 ,stop   = max(BPcum)
+                                                 ,ymin   = -50
+                                                 ,ymax   = 1000)
+x_scale     <- scale_x_continuous(label=axisdf$CHR,breaks = axisdf$center,expand=c(0,0))
+x_scale_lg  <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,2))
+x_scale_cp  <- scale_x_continuous(expand=c(0,0)   ,breaks = seq(0,40,0.2))
+
+#genome rectangles
+bg_rect <- annotate("rect", xmin = axisdf$start, xmax = axisdf$stop, 
+    ymin = axisdf$ymin, ymax = axisdf$ymax, alpha = .5, fill = rep(c("darkgrey","white"),20)[1:nrow(axisdf)] )
+
+#reduced aesthetics for most plots
+theme_adj  <- theme(axis.title.x        = element_blank(),
+                    axis.text.x         = element_blank(),
+                    axis.ticks.x.bottom = element_blank(),
+                    panel.grid          = element_blank(),
+                    axis.line.y.left    = element_line(),
+                    axis.text.y         = element_text(size = 10),
+                    axis.title.y        = element_text(size = 15),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"))
+ 
+#modified aesthetics for last plot 
+theme_last <- theme(panel.grid  = element_blank(),
+                    plot.margin = unit(c(0,0,0.0,0), units = "in"),
+                    axis.text.x = element_text(angle = 0, size = 18),
+                    axis.title.x = element_text(size = 14, face = "bold"))
+
+theme_single <- theme(panel.grid  = element_blank(),
+                    axis.text.x = element_text(angle = 0, size = 18),
+                    axis.title.x = element_text(size = 14, face = "bold"))
+
+```
+
+
+
+#Read in output from selection_scan.Rmd
+```{r}
+#ROI selection
+N_WOI <- 2 #windows of interest
+qval_thresh <- 0.01
+xpnsl_thresh <- 1
+hamming <- 100000
+
+#pixy and selscan
+all_stats  <- read_tsv(glue("{output_dir}/selection_scan/pixy_and_selscan_selection_stats_{slw_abr}_xpnsl_thresh{xpnsl_thresh}_hamming{hamming}.tsv"))
+ROI        <- read_tsv(glue("{output_dir}/selection_scan/ROI_{slw_abr}_xpnsl_thresh{xpnsl_thresh}_hamming{hamming}.tsv"))
+ROI_sum    <- read_tsv(glue("{output_dir}/selection_scan/ROI_sum_{slw_abr}_xpnsl_thresh{xpnsl_thresh}_hamming{hamming}.tsv")) %>% filter(N >= N_WOI, start > 1e6)
+
+############################
+
+#create rectangle for ROIs in Manhattan plot
+#the 300000 added is make the windows fit aesthetically, this has nothing to do with the width of the region of interest
+slc_rect <- annotate("rect", xmin = ROI_sum$cum_start-300000, xmax = ROI_sum$cum_stop+300000, 
+    ymin = rep(-50,length(nrow(ROI_sum))), ymax = rep(1000,length(nrow(ROI_sum))), alpha = 0.4, fill = "black", color = "NA")
+
+```
+
+```{r}
+plot_fst <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=fst), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=fst), size=1.5, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$fst,na.rm =T),max(all_stats$fst,na.rm =T)))+
+    ylab(expression(italic(F)[ST]))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_fst
+
+plot_dxy <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=dxy), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=dxy), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$dxy,na.rm =T),max(all_stats$dxy,na.rm =T)))+
+    ylab(expression(italic(D)[xy]))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_dxy
+
+plot_dxy_low <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=dxy), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=dxy), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$dxy,na.rm =T),0.01))+
+    ylab(expression(italic(D)[xy]))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+
+plot_xpnsl <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=xpnsl_best_score), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=xpnsl_best_score), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$xpnsl_best_score,na.rm =T),max(all_stats$xpnsl_best_score,na.rm =T)))+
+    ylab(expression("XP-nSL"))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_xpnsl
+
+plot_tjd_delta <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=tjd_delta), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=tjd_delta), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$tjd_delta,na.rm =T),max(all_stats$tjd_delta,na.rm =T)))+
+    ylab(expression(Delta*italic(D)))+ theme_bw() + x_scale +theme_single + theme(legend.position = "none" )
+#plot_tjd_delta
+
+plot_tjd_NE <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=tjd_NE), size = 0.6, color = pop_colors[1]) +
+  geom_point(data = . %>% filter(outlier), aes(y=tjd_NE), size=1, color="#00A087FF") +
+  geom_hline(yintercept = 0)+
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$tjd_NE,na.rm =T),max(all_stats$tjd_NE,na.rm =T)))+
+    ylab(expression(italic(D)[NE]))+ theme_bw() + x_scale +theme_single + theme(legend.position = "none" )
+#plot_tjd_NE
+
+plot_tjd_SW <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=tjd_SW), size = 0.6, color = pop_colors[2]) +
+  geom_point(data = . %>% filter(outlier), aes(y=tjd_SW), size=1, color="#00A087FF") +
+  geom_hline(yintercept = 0)+
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$tjd_SW,na.rm =T),max(all_stats$tjd_SW,na.rm =T)))+
+    ylab(expression(italic(D)[SW]))+ theme_bw() + x_scale +theme_single + theme(legend.position = "none" )
+#plot_tjd_SW
+
+plot_pi_delta <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=pi_delta), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=pi_delta), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$pi_delta,na.rm =T),max(all_stats$pi_delta,na.rm =T)))+
+    ylab(expression(Delta*pi))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_pi_delta
+
+plot_pi <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_hline(yintercept = 0)+
+  geom_point(aes(y=pi_NE), size = 0.6, color = pop_colors[1]) +
+  geom_point(aes(y=-pi_SW), size = 0.6, color = pop_colors[2]) +
+  geom_point(data = . %>% filter(outlier), aes(y=pi_NE), size=1, color="#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=-pi_SW), size=1, color="#00A087FF") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(-all_stats$pi_SW,na.rm =T),max(all_stats$pi_NE,na.rm =T)))+
+    scale_y_continuous(breaks = c(-0.1, -0.05, 0, 0.05, 0.1),labels = c(0.1, 0.05, 0, 0.05, 0.1))+
+    ylab(expression(Delta*pi))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_pi
+
+plot_wtt_delta <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_point(aes(y=wtt_delta), size = 0.6, color = "#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=wtt_delta), size=1, color="red") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(all_stats$wtt_delta,na.rm =T),max(all_stats$wtt_delta,na.rm =T)))+
+    ylab(expression(Delta*Theta))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_wtt_delta
+
+plot_wtt <- ggplot(all_stats, aes(x=BPcum)) + bg_rect + slc_rect +
+  geom_hline(yintercept = 0)+
+  geom_point(aes(y=wtt_NE), size = 0.6, color = pop_colors[1]) +
+  geom_point(aes(y=-wtt_SW), size = 0.6, color = pop_colors[2]) +
+  geom_point(data = . %>% filter(outlier), aes(y=wtt_NE), size=1, color="#00A087FF") +
+  geom_point(data = . %>% filter(outlier), aes(y=-wtt_SW), size=1, color="#00A087FF") +
+  labs(color = "Comparison") +
+  xlab("Linkage Group") +
+    coord_cartesian(ylim = c(min(-all_stats$wtt_SW,na.rm =T),max(all_stats$wtt_NE,na.rm =T)))+
+    #scale_y_continuous(breaks = c(-0.1, -0.05, 0, 0.05, 0.1),labels = c(0.1, 0.05, 0, 0.05, 0.1))+
+    ylab(expression(Theta))+ theme_bw() + x_scale + theme_single + theme(legend.position = "none" )
+#plot_wtt
+```
+
+```{r, fig.width=20, fig.height=15}
+
+fst_merge       <- plot_fst + theme_adj
+xpnsl_merge     <- plot_xpnsl + theme_adj
+xpnsl_last     <- plot_xpnsl + theme_last
+tjd_delta_merge_adj  <- plot_tjd_delta + theme_adj
+tjd_delta_merge_last <- plot_tjd_delta + theme_last
+tjd_NE_merge    <- plot_tjd_NE + theme_adj
+tjd_SW_merge    <- plot_tjd_SW + theme_adj
+pi_delta_merge  <- plot_pi_delta  + theme_adj
+pi_merge        <- plot_pi + theme_adj
+wtt_delta_merge <- plot_wtt_delta  + theme_adj
+wtt_delta_last  <- plot_wtt_delta  + theme_last
+wtt_merge       <- plot_wtt + theme_adj
+dxy_merge       <- plot_dxy + theme_adj
+dxy_low_merge   <- plot_dxy_low +theme_adj
+
+#main_figure
+fst_merge / xpnsl_last + 
+      plot_layout(guides    = "collect") & 
+      #plot_annotation(title = paste0("LG",i)) &
+      #theme(legend.position = 'bottom'
+      #     ,legend.title    = element_text(size = 20,face = "bold")
+      #     ,legend.text     = element_text(size = 15)) & 
+      guides(color = guide_legend(override.aes = list(size = 7)))
+ggsave(filename = glue("{output_dir}/Selection_scan/Manhattan_plots/slw{slw}/{data_set}_{slw_abr}_xpnsl_thresh{xpnsl_thresh}_hamming{hamming}_main_plot2.png"), dpi = 300, height = 7, width = 20, units = "in")
+
+#supplementary fig
+fst_merge / xpnsl_merge / pi_delta_merge / dxy_merge / dxy_low_merge / tjd_delta_merge_adj / tjd_NE_merge / tjd_SW_merge / pi_merge / pi_delta_merge / wtt_merge / wtt_delta_last + 
+      plot_layout(guides    = "collect") & 
+      #plot_annotation(title = paste0("LG",i)) &
+      #theme(legend.position = 'bottom'
+      #     ,legend.title    = element_text(size = 20,face = "bold")
+      #     ,legend.text     = element_text(size = 15)) & 
+      guides(color = guide_legend(override.aes = list(size = 7)))
+ggsave(filename = glue("{output_dir}/Selection_scan/Manhattan_plots/slw{slw}/{data_set}_{slw_abr}_xpnsl_thresh{xpnsl_thresh}_hamming{hamming}_supp_plot.png"), dpi = 300, height = 20, width = 20, units = "in")
+
+```
